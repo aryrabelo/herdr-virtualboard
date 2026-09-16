@@ -6,14 +6,14 @@ import (
 	"sort"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/config"
-	"github.com/netors/herdr-virtualboard/internal/dispatch"
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/herdrcli"
-	"github.com/netors/herdr-virtualboard/internal/roles"
-	"github.com/netors/herdr-virtualboard/internal/runs"
-	"github.com/netors/herdr-virtualboard/internal/vb"
-	"github.com/netors/herdr-virtualboard/internal/workspace"
+	"github.com/virtualboard/herdr-virtualboard/internal/config"
+	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/herdrcli"
+	"github.com/virtualboard/herdr-virtualboard/internal/roles"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/vb"
+	"github.com/virtualboard/herdr-virtualboard/internal/workspace"
 )
 
 // Backend is everything the board reads and mutates. It is an interface so the

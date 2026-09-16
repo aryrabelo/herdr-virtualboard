@@ -13,7 +13,7 @@ VirtualBoard role agent in a visible pane.**
   <img src="docs/assets/board.png" alt="The hvb board: five columns — backlog, in progress, blocked, review, done — each card showing its feature number, title, priority, complexity, owner and acceptance-criteria progress." width="100%">
 </p>
 
-**📖 [Full documentation](https://netors.github.io/herdr-virtualboard/)**
+**📖 [Full documentation](https://virtualboard.github.io/herdr-virtualboard/)**
 
 ## Why this exists
 
@@ -42,7 +42,7 @@ every change back through `vb`:
 ## Install
 
 ```bash
-herdr plugin install netors/herdr-virtualboard
+herdr plugin install virtualboard/herdr-virtualboard
 ```
 
 Open the board:

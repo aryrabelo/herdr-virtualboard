@@ -3,8 +3,8 @@ package cli
 import (
 	"runtime"
 
-	"github.com/netors/herdr-virtualboard/internal/herdrcli"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/herdrcli"
 )
 
 func newVersionCommand(app *App) *cobra.Command {

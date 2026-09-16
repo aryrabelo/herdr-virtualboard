@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // agentsDir writes a charter set shaped like the one

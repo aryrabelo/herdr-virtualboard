@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // newWorkspace builds a minimal VirtualBoard layout: the five status

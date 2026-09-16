@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
 // renderFeatureTable prints the list grouped by status, in board order.

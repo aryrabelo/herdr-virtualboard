@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/dispatch"
-	"github.com/netors/herdr-virtualboard/internal/herdrcli"
-	"github.com/netors/herdr-virtualboard/internal/runs"
-	"github.com/netors/herdr-virtualboard/internal/vb"
-	"github.com/netors/herdr-virtualboard/internal/workspace"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
+	"github.com/virtualboard/herdr-virtualboard/internal/herdrcli"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/vb"
+	"github.com/virtualboard/herdr-virtualboard/internal/workspace"
 )
 
 // The first five exit codes mirror vb's own, so a script driving both CLIs

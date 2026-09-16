@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/git"
+	"github.com/virtualboard/herdr-virtualboard/internal/git"
 )
 
 func remote(t *testing.T, raw string) git.Remote {

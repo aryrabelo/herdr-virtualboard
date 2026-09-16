@@ -5,8 +5,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
 // Palette holds the SGR sequences the board draws with. When colour is off

@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/git"
+	"github.com/virtualboard/herdr-virtualboard/internal/git"
 )
 
 // Request is a pull request to open.

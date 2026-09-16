@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 func newStore(t *testing.T) *Store {

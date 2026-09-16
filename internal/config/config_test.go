@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 func writeConfig(t *testing.T, dir, name, content string) string {

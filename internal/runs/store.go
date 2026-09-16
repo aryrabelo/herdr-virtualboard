@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // State is a run's lifecycle state.

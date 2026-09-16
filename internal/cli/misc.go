@@ -4,10 +4,10 @@ import (
 	"context"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/herdrcli"
-	"github.com/netors/herdr-virtualboard/internal/roles"
-	"github.com/netors/herdr-virtualboard/internal/vb"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/herdrcli"
+	"github.com/virtualboard/herdr-virtualboard/internal/roles"
+	"github.com/virtualboard/herdr-virtualboard/internal/vb"
 )
 
 func newRoleCommand(app *App) *cobra.Command {

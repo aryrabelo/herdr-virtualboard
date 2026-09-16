@@ -10,9 +10,9 @@ func TestParseRemote(t *testing.T) {
 		owner string
 		name  string
 	}{
-		{"git@github.com:netors/herdr-virtualboard.git", GitHub, "github.com", "netors", "herdr-virtualboard"},
-		{"https://github.com/netors/herdr-virtualboard.git", GitHub, "github.com", "netors", "herdr-virtualboard"},
-		{"https://github.com/netors/herdr-virtualboard", GitHub, "github.com", "netors", "herdr-virtualboard"},
+		{"git@github.com:virtualboard/herdr-virtualboard.git", GitHub, "github.com", "virtualboard", "herdr-virtualboard"},
+		{"https://github.com/virtualboard/herdr-virtualboard.git", GitHub, "github.com", "virtualboard", "herdr-virtualboard"},
+		{"https://github.com/virtualboard/herdr-virtualboard", GitHub, "github.com", "virtualboard", "herdr-virtualboard"},
 		// A self-hosted Forgejo over ssh:// with a non-default port — the
 		// shape that broke naive url.Parse handling.
 		{"ssh://git@forgejo.internal.example:2222/TeamOrg/service.git", Forgejo, "forgejo.internal.example", "TeamOrg", "service"},

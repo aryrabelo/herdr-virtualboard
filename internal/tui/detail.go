@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // renderDetail draws the focused card's full spec and run history.

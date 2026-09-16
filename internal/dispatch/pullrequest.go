@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/forge"
-	"github.com/netors/herdr-virtualboard/internal/git"
-	"github.com/netors/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/forge"
+	"github.com/virtualboard/herdr-virtualboard/internal/git"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
 // openPullRequest pushes a successful run's branch and opens a pull request.

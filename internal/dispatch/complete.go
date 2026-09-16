@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/herdrcli"
-	"github.com/netors/herdr-virtualboard/internal/runs"
-	"github.com/netors/herdr-virtualboard/internal/vb"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/herdrcli"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/vb"
 )
 
 // Outcome is what a finished agent reports.

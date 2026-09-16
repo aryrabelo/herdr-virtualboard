@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // NewResult is the data payload of `vb new --json`.

@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 	"gopkg.in/yaml.v3"
 )
 

@@ -2,7 +2,7 @@
 # Local-development install: build hvb, link this checkout as a herdr plugin,
 # and optionally add the keybinding.
 #
-# This is NOT what `herdr plugin install netors/herdr-virtualboard` runs — that
+# This is NOT what `herdr plugin install virtualboard/herdr-virtualboard` runs — that
 # path uses only the [[build]] steps in herdr-plugin.toml. Use this script when
 # you are working on the plugin itself and want herdr to run your checkout.
 #

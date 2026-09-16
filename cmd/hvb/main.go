@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/netors/herdr-virtualboard/internal/cli"
+	"github.com/virtualboard/herdr-virtualboard/internal/cli"
 )
 
 // version is set by the linker: -ldflags "-X main.version=0.1.0".

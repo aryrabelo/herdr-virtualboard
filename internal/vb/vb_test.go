@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // fakeVB writes an executable stub that records its argv and replies with a

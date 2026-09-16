@@ -1,8 +1,8 @@
 package cli
 
 import (
-	"github.com/netors/herdr-virtualboard/internal/dispatch"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
 )
 
 func newSkillCommand(app *App) *cobra.Command {

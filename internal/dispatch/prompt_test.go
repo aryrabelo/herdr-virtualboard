@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/config"
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/roles"
+	"github.com/virtualboard/herdr-virtualboard/internal/config"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/roles"
 )
 
 func sampleSpec(t *testing.T) *feature.Spec {

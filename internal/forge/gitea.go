@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/git"
+	"github.com/virtualboard/herdr-virtualboard/internal/git"
 )
 
 // giteaAPI opens pull requests on Forgejo and Gitea, which share an API.

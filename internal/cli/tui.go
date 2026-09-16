@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/netors/herdr-virtualboard/internal/tui"
-	"github.com/netors/herdr-virtualboard/internal/workspace"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/tui"
+	"github.com/virtualboard/herdr-virtualboard/internal/workspace"
 )
 
 func newTUICommand(app *App) *cobra.Command {

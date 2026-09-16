@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
 // gitRepo turns the harness's workspace root into a real git repository with a

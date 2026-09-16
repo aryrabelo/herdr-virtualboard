@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/git"
-	"github.com/netors/herdr-virtualboard/internal/runs"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/git"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
 // ErrNotAGitRepo reports that a worktree run was asked for in a directory that

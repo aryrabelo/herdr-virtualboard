@@ -1,4 +1,4 @@
-module github.com/netors/herdr-virtualboard
+module github.com/virtualboard/herdr-virtualboard
 
 go 1.25.1
 

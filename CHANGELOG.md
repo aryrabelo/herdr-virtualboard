@@ -77,4 +77,4 @@ First release.
 - A plugin pane inherits the focused pane's working directory, so the board opens on whatever
   project you are looking at.
 
-[0.1.0]: https://github.com/netors/herdr-virtualboard/releases/tag/v0.1.0
+[0.1.0]: https://github.com/virtualboard/herdr-virtualboard/releases/tag/v0.1.0

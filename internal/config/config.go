@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/git"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/git"
 )
 
 // ProjectFile is the per-project config filename, resolved against the project

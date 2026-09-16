@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/feature"
-	"github.com/netors/herdr-virtualboard/internal/vb"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/vb"
 )
 
 func newFeatureCommand(app *App) *cobra.Command {

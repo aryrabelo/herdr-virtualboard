@@ -4,9 +4,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/netors/herdr-virtualboard/internal/dispatch"
-	"github.com/netors/herdr-virtualboard/internal/runs"
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
+	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
 func newRunCommand(app *App) *cobra.Command {

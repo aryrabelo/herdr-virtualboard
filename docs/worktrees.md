@@ -141,3 +141,29 @@ point: you see the whole path including how it behaves when a forge is not
 reachable.
 
 `e2e/09-worktree-pr.sh` automates exactly this.
+
+## The startup dialog
+
+The first dispatch into a new worktree usually stops before it starts:
+
+```text
+hvb: the claude agent is waiting on its own startup dialog.
+     Answer it in the pane (`hvb run focus <run-id>`); hvb submits the task
+     as soon as the agent is ready. It never answers that dialog for you.
+```
+
+A worktree is a directory the harness has never seen, so Claude Code asks
+whether you trust it. Herdr reports this as `agent_not_ready`, which sounds like
+a failure and is not: the agent is running, its name is valid, and only a human
+answering stands between it and working.
+
+hvb therefore treats it as a launched agent, parks the task on the run, and
+submits it the moment the agent goes idle — the next board refresh, or the next
+`hvb run list`. You do nothing but answer the dialog.
+
+**hvb never answers it for you.** Whether to trust a directory is a security
+decision, and a board that clicks "yes, I trust this folder" on your behalf
+would be making it without being asked.
+
+Once answered, the harness remembers that path, so subsequent dispatches into
+the same worktree start straight into the task.

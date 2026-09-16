@@ -154,6 +154,11 @@ hvb run cleanup FTR-0007            # remove the checkout when you are done
 Nothing about this is on by default: no worktree is created, no branch is cut
 and no forge is contacted unless a dispatch asks for it.
 
+The first dispatch into a new worktree usually stops at the harness's own trust
+prompt for a directory it has never seen. That is not a failure — hvb parks the
+task, tells you to answer the dialog, and submits it by itself once the agent is
+ready. It never answers that dialog for you.
+
 ### Dispatching
 
 Pressing `d` on a card opens the role picker, pre-selected from the feature's labels — `backend`

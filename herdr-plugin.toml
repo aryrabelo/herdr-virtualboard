@@ -1,0 +1,49 @@
+# herdr-plugin.toml — manifest for the herdr-virtualboard plugin.
+#
+# herdr-virtualboard turns a VirtualBoard workspace into a kanban board inside
+# Herdr: columns are the VirtualBoard lifecycle (backlog → in-progress → review
+# → done, with in-progress ↔ blocked), cards are the markdown feature specs
+# under `.virtualboard/features/`, and dispatching a card starts a VirtualBoard
+# role agent in a visible Herdr pane.
+#
+# The board is the repository. `vb` and the specs are the single source of
+# truth; hvb records only which pane is running which feature. Nothing here
+# writes to Herdr's own state.
+#
+# Field reference verified against `herdr plugin` on Herdr 0.9.0. The manifest
+# enforces the install-time floor; the runtime gate in internal/herdrcli
+# additionally requires exactly 0.9.0 and socket protocol 22.
+id = "herdr-virtualboard"
+name = "VirtualBoard"
+version = "0.1.0"
+description = "Kanban board for VirtualBoard feature specs: columns are the lifecycle, cards are specs, and dispatching a card starts a role agent in a Herdr pane."
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos"]
+
+# Build the `hvb` binary at install time. Idempotent: the Go build cache makes
+# a rebuild with no changes a no-op.
+[[build]]
+command = ["./scripts/build.sh"]
+
+# Copy the built CLI to a stable location on the user's PATH. This is separate
+# from scripts/install.sh, whose plugin-link and keybinding changes are meant
+# only for explicit local-development installs.
+[[build]]
+command = ["./scripts/install-cli.sh"]
+
+# The kanban TUI, spawned by Herdr in an overlay pane. The same binary is the
+# CLI that dispatched agents report through.
+[[panes]]
+id = "board"
+title = "VirtualBoard"
+placement = "overlay"
+command = ["./bin/hvb", "tui"]
+
+# Summon the board. Bind it to a key with a [[keys.command]] in
+# ~/.config/herdr/config.toml (see the README). The launcher is idempotent:
+# open, then focus, then toggle off on a repeat press.
+[[actions]]
+id = "open-virtualboard"
+title = "Open VirtualBoard"
+description = "Open the VirtualBoard kanban as an overlay pane (focus or toggle if it is already open)."
+command = ["bash", "scripts/open-board.sh"]

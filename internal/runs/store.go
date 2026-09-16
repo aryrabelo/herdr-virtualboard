@@ -1,0 +1,426 @@
+// Package runs records agent dispatches.
+//
+// This is the only state hvb owns. The board itself is the repository: `vb` and
+// the markdown specs under `.virtualboard/features/` hold every fact about a
+// feature, and hvb never shadows one. What the repository cannot hold is which
+// Herdr pane is currently running which feature — that is machine-local,
+// short-lived, and would be noise in a commit — so it lives here instead, in one
+// JSON file per project under the user's data directory.
+package runs
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/netors/herdr-virtualboard/internal/feature"
+)
+
+// State is a run's lifecycle state.
+type State string
+
+const (
+	// Queued: the run record exists but no pane has been created yet.
+	Queued State = "queued"
+	// Running: an agent is live in its pane.
+	Running State = "running"
+	// Awaiting: the harness finished its turn without reporting an outcome,
+	// so a human should look. Reached when Herdr reports `done` but the
+	// agent never called `hvb run done`.
+	Awaiting State = "awaiting"
+	// Succeeded / Failed: the agent reported an explicit outcome.
+	Succeeded State = "succeeded"
+	Failed    State = "failed"
+	// Cancelled: a human stopped the run.
+	Cancelled State = "cancelled"
+)
+
+// Terminal reports whether no further transition is expected.
+func (s State) Terminal() bool {
+	switch s {
+	case Succeeded, Failed, Cancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Run is one dispatch of one feature to one agent.
+type Run struct {
+	ID        string `json:"id"`
+	FeatureID string `json:"feature_id"`
+	// Title is copied at dispatch so a run for a deleted feature still reads
+	// sensibly in the history.
+	Title string `json:"title"`
+	// Status is the feature's lifecycle status when the run started, which
+	// is what selected the column policy that dispatched it.
+	Status feature.Status `json:"status"`
+	Role   string         `json:"role"`
+	Kind   string         `json:"kind"`
+	State  State          `json:"state"`
+
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	TabID       string `json:"tab_id,omitempty"`
+	PaneID      string `json:"pane_id,omitempty"`
+	AnchorPane  string `json:"anchor_pane,omitempty"`
+	AgentName   string `json:"agent_name,omitempty"`
+
+	StartedAt  time.Time  `json:"started_at"`
+	EndedAt    *time.Time `json:"ended_at,omitempty"`
+	Outcome    string     `json:"outcome,omitempty"`
+	Note       string     `json:"note,omitempty"`
+	MovedTo    string     `json:"moved_to,omitempty"`
+	Comments   []Comment  `json:"comments,omitempty"`
+	LastErrors []string   `json:"last_errors,omitempty"`
+}
+
+// Comment is a note attached to a run, by an agent or a human.
+type Comment struct {
+	At     time.Time `json:"at"`
+	Author string    `json:"author"`
+	Body   string    `json:"body"`
+}
+
+// Active reports whether the run still occupies a pane hvb should watch.
+func (r *Run) Active() bool { return !r.State.Terminal() }
+
+// Duration is how long the run has been going, or how long it took.
+func (r *Run) Duration() time.Duration {
+	if r.EndedAt != nil {
+		return r.EndedAt.Sub(r.StartedAt)
+	}
+	return time.Since(r.StartedAt)
+}
+
+// document is the on-disk file shape.
+type document struct {
+	Version int    `json:"version"`
+	Project string `json:"project"`
+	Runs    []*Run `json:"runs"`
+}
+
+// version is the run-file schema version. Bump it when the shape changes in a
+// way an older hvb would misread; Load discards a file from the future rather
+// than guessing at it.
+const version = 1
+
+// MaxRunsPerFeature caps retained history per feature. Older terminal runs are
+// pruned on save so a long-lived board does not grow without bound.
+const MaxRunsPerFeature = 20
+
+// Store is the per-project run file. It is safe for concurrent use within one
+// process and uses atomic replacement plus a lock file across processes.
+type Store struct {
+	path string
+	mu   sync.Mutex
+}
+
+// ErrNotFound is returned when a run id does not exist.
+var ErrNotFound = errors.New("run not found")
+
+// DataDir is the directory holding run files: $HVB_DATA_DIR, else
+// $XDG_DATA_HOME/herdr-virtualboard, else ~/.local/share/herdr-virtualboard.
+func DataDir() (string, error) {
+	if dir := os.Getenv("HVB_DATA_DIR"); dir != "" {
+		return dir, nil
+	}
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		return filepath.Join(dir, "herdr-virtualboard"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".local", "share", "herdr-virtualboard"), nil
+}
+
+// Open returns the run store for a project, keyed by the workspace identity so
+// two checkouts of the same repository keep separate histories.
+func Open(projectID string) (*Store, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return nil, err
+	}
+	runsDir := filepath.Join(dir, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create run directory: %w", err)
+	}
+	return &Store{path: filepath.Join(runsDir, projectID+".json")}, nil
+}
+
+// Path is the run file's location, for diagnostics.
+func (s *Store) Path() string { return s.path }
+
+// List returns every run, newest first.
+func (s *Store) List() ([]*Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(doc.Runs, func(i, j int) bool { return doc.Runs[i].StartedAt.After(doc.Runs[j].StartedAt) })
+	return doc.Runs, nil
+}
+
+// ForFeature returns a feature's runs, newest first.
+func (s *Store) ForFeature(featureID string) ([]*Run, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var out []*Run
+	for _, run := range all {
+		if strings.EqualFold(run.FeatureID, featureID) {
+			out = append(out, run)
+		}
+	}
+	return out, nil
+}
+
+// Active returns the runs still holding a pane, newest first.
+func (s *Store) Active() ([]*Run, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var out []*Run
+	for _, run := range all {
+		if run.Active() {
+			out = append(out, run)
+		}
+	}
+	return out, nil
+}
+
+// Get returns one run by id, or by the `latest` alias for a feature.
+func (s *Store) Get(id string) (*Run, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range all {
+		if run.ID == id {
+			return run, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+}
+
+// Latest returns a feature's most recent run.
+func (s *Store) Latest(featureID string) (*Run, error) {
+	all, err := s.ForFeature(featureID)
+	if err != nil {
+		return nil, err
+	}
+	if len(all) == 0 {
+		return nil, fmt.Errorf("%w: no runs for %s", ErrNotFound, featureID)
+	}
+	return all[0], nil
+}
+
+// Append adds a run.
+func (s *Store) Append(run *Run) error {
+	return s.mutate(func(doc *document) error {
+		doc.Runs = append(doc.Runs, run)
+		return nil
+	})
+}
+
+// Update applies a mutation to one run under the file lock, so a concurrent
+// `hvb run done` from an agent pane and a TUI refresh cannot lose each other's
+// write.
+func (s *Store) Update(id string, apply func(*Run) error) (*Run, error) {
+	var updated *Run
+	err := s.mutate(func(doc *document) error {
+		for _, run := range doc.Runs {
+			if run.ID != id {
+				continue
+			}
+			if err := apply(run); err != nil {
+				return err
+			}
+			updated = run
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// Finish marks a run terminal. It is idempotent: a run that already ended keeps
+// its first outcome, because the agent's own report should not be overwritten
+// by a later reconciliation noticing the pane closed.
+func (s *Store) Finish(id string, state State, outcome, note string) (*Run, error) {
+	return s.Update(id, func(run *Run) error {
+		if run.State.Terminal() {
+			return nil
+		}
+		now := time.Now().UTC()
+		run.State = state
+		run.EndedAt = &now
+		run.Outcome = outcome
+		if note != "" {
+			run.Note = note
+		}
+		return nil
+	})
+}
+
+// AddComment appends a comment to a run.
+func (s *Store) AddComment(id, author, body string) (*Run, error) {
+	return s.Update(id, func(run *Run) error {
+		run.Comments = append(run.Comments, Comment{At: time.Now().UTC(), Author: author, Body: body})
+		return nil
+	})
+}
+
+func (s *Store) mutate(apply func(*document) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	doc, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := apply(doc); err != nil {
+		return err
+	}
+	prune(doc)
+	return s.save(doc)
+}
+
+func (s *Store) load() (*document, error) {
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &document{Version: version}, nil
+		}
+		return nil, fmt.Errorf("read run store: %w", err)
+	}
+	var doc document
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		// A corrupt run file must not make the board unusable: runs are a
+		// convenience, the repository is the truth. Start clean and say so.
+		return &document{Version: version}, nil
+	}
+	if doc.Version > version {
+		return &document{Version: version}, nil
+	}
+	doc.Version = version
+	return &doc, nil
+}
+
+func (s *Store) save(doc *document) error {
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode run store: %w", err)
+	}
+	raw = append(raw, '\n')
+	temp, err := os.CreateTemp(filepath.Dir(s.path), ".runs-*.json")
+	if err != nil {
+		return fmt.Errorf("stage run store: %w", err)
+	}
+	name := temp.Name()
+	defer os.Remove(name)
+	if _, err := temp.Write(raw); err != nil {
+		temp.Close()
+		return fmt.Errorf("write run store: %w", err)
+	}
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return fmt.Errorf("chmod run store: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close run store: %w", err)
+	}
+	if err := os.Rename(name, s.path); err != nil {
+		return fmt.Errorf("replace run store: %w", err)
+	}
+	return nil
+}
+
+// lockFile takes a cross-process advisory lock by exclusive-create, retrying
+// briefly. Every writer holds it for a single read-modify-write, so waiting is
+// short; a lock older than lockStale is treated as abandoned.
+func (s *Store) lockFile() (func(), error) {
+	path := s.path + ".lock"
+	deadline := time.Now().Add(lockWait)
+	for {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			fmt.Fprintf(file, "%d\n", os.Getpid())
+			file.Close()
+			return func() { os.Remove(path) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("lock run store: %w", err)
+		}
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > lockStale {
+			os.Remove(path)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("lock run store: %s held for over %s", path, lockWait)
+		}
+		time.Sleep(lockPoll)
+	}
+}
+
+const (
+	lockWait  = 5 * time.Second
+	lockPoll  = 20 * time.Millisecond
+	lockStale = 60 * time.Second
+)
+
+// prune caps per-feature history, dropping the oldest terminal runs first and
+// never dropping an active one.
+func prune(doc *document) {
+	byFeature := map[string][]*Run{}
+	for _, run := range doc.Runs {
+		byFeature[run.FeatureID] = append(byFeature[run.FeatureID], run)
+	}
+	drop := map[string]bool{}
+	for _, group := range byFeature {
+		if len(group) <= MaxRunsPerFeature {
+			continue
+		}
+		sort.SliceStable(group, func(i, j int) bool { return group[i].StartedAt.Before(group[j].StartedAt) })
+		excess := len(group) - MaxRunsPerFeature
+		for _, run := range group {
+			if excess == 0 {
+				break
+			}
+			if run.Active() {
+				continue
+			}
+			drop[run.ID] = true
+			excess--
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	kept := doc.Runs[:0]
+	for _, run := range doc.Runs {
+		if !drop[run.ID] {
+			kept = append(kept, run)
+		}
+	}
+	doc.Runs = kept
+}

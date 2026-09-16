@@ -199,6 +199,33 @@ STATUS
   *"workspace list"*)
     echo "{\"id\":\"x\",\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"project\"}]}}"
     ;;
+  *"worktree list"*)
+    if [ -f "$state_dir/worktrees.json" ]; then cat "$state_dir/worktrees.json"; else
+      echo '{"id":"x","result":{"worktrees":[],"source":{"repo_root":"'"${HERDR_STUB_CWD:-/nonexistent}"'"}}}'
+    fi
+    ;;
+  *"worktree create"*)
+    # Cut the branch and the checkout for real, so the scenario can assert on
+    # actual git state rather than on hvb having called a stub.
+    branch=""; base=""
+    set -- $*
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --branch) branch="$2"; shift ;;
+        --base) base="$2"; shift ;;
+      esac
+      shift
+    done
+    wt="$state_dir/worktrees/$(printf '%s' "$branch" | tr '/' '-')"
+    mkdir -p "$(dirname "$wt")"
+    git -C "${HERDR_STUB_CWD}" worktree add -q -b "$branch" "$wt" "${base:-main}" >/dev/null 2>&1 ||       git -C "${HERDR_STUB_CWD}" worktree add -q "$wt" "$branch" >/dev/null 2>&1
+    echo "wG:p1 wG:t1" >> "$state_dir/live_panes"
+    printf '{"id":"x","result":{"workspace":{"workspace_id":"wG","label":"ftr","worktree":{"checkout_path":"%s","is_linked_worktree":true,"repo_root":"%s"}},"tab":{"tab_id":"wG:t1","workspace_id":"wG"},"root_pane":{"pane_id":"wG:p1","tab_id":"wG:t1","workspace_id":"wG","cwd":"%s"},"worktree":{"path":"%s","branch":"%s","is_linked_worktree":true}}}\n' \
+      "$wt" "${HERDR_STUB_CWD}" "$wt" "$wt" "$branch"
+    ;;
+  *"worktree remove"*)
+    echo '{"id":"x","result":{"type":"worktree_removed"}}'
+    ;;
   *"workspace create"*)
     echo '{"id":"x","result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}'
     ;;

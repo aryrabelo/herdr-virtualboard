@@ -67,7 +67,7 @@ func newHarness(t *testing.T, statuses map[string]feature.Status, herdrScript st
 
 	return &harness{
 		t:    t,
-		root: root,
+		root: ws.Root,
 		dispatcher: &Dispatcher{
 			Workspace: ws,
 			Config:    &cfg,

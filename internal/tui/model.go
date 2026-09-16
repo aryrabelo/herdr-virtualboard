@@ -25,6 +25,9 @@ type Backend interface {
 	Create(ctx context.Context, title string, labels []string, priority string) (string, error)
 	SetField(ctx context.Context, id, key, value string) error
 	Dispatch(ctx context.Context, spec *feature.Spec, role, kind string, force bool) (*runs.Run, error)
+	// DispatchWith is Dispatch with explicit worktree and pull-request
+	// intent; nil for either inherits configuration.
+	DispatchWith(ctx context.Context, spec *feature.Spec, role, kind string, worktree, pr *bool) (*runs.Run, error)
 	Cancel(ctx context.Context, runID string) error
 	Focus(ctx context.Context, runID string) error
 	Roles() []roles.Role
@@ -355,6 +358,12 @@ func (b *liveBackend) SetField(ctx context.Context, id, key, value string) error
 
 func (b *liveBackend) Dispatch(ctx context.Context, spec *feature.Spec, role, kind string, force bool) (*runs.Run, error) {
 	return b.dispatcher.Start(ctx, dispatch.Request{Spec: spec, Role: role, Kind: kind, Force: force})
+}
+
+func (b *liveBackend) DispatchWith(ctx context.Context, spec *feature.Spec, role, kind string, worktree, pr *bool) (*runs.Run, error) {
+	return b.dispatcher.Start(ctx, dispatch.Request{
+		Spec: spec, Role: role, Kind: kind, Worktree: worktree, PR: pr,
+	})
 }
 
 func (b *liveBackend) Cancel(ctx context.Context, runID string) error {

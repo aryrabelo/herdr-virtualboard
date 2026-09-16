@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Optional worktree dispatch.** Moving a card into `in-progress` now asks
+  whether to start an agent, and how isolated it should be: in the project, in a
+  git worktree on the feature's own branch, or in a worktree with a pull request
+  at the end. Declining is the default. `hvb run start --worktree` / `--pr` do
+  the same from the shell.
+- **Worktrees through Herdr's own support.** A worktree run uses
+  `herdr worktree create`, so the checkout appears as a linked workspace grouped
+  beside the project rather than as a directory nobody can see. The branch name
+  follows VirtualBoard's convention, `feature/<ID>/<slug>`.
+- **Pull requests.** A successful worktree run pushes its branch and opens a PR
+  with the feature's acceptance criteria and the agent's commits in the body,
+  then writes the link into the spec's Links section through `vb`. GitHub uses
+  the `gh` CLI's existing credentials; Forgejo and Gitea use their REST API with
+  a token from `forge.token` or `$HVB_FORGE_TOKEN`.
+- **`hvb run cleanup`** removes a finished run's checkout, refusing while work is
+  uncommitted unless forced.
+
+### Notes
+
+- A pull request that cannot be opened — no token, no client for the forge, no
+  commits, a dirty checkout — never fails the run. The outcome stands, the
+  feature still moves, and the reason is recorded with a compare URL where one
+  can be built.
+- Nothing here is on by default. No branch is cut and no forge is contacted
+  unless a dispatch asks for it.
+
 ## [0.1.0] — 2026-09-15
 
 First release.

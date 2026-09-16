@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/netors/herdr-virtualboard/internal/config"
 	"github.com/netors/herdr-virtualboard/internal/feature"
 	"github.com/netors/herdr-virtualboard/internal/roles"
 )
@@ -284,6 +285,7 @@ func (m *Model) openMovePicker() {
 				return err
 			}
 			m.setStatus("%s → %s", card.Spec.ID, target)
+			m.offerDispatch(card, target)
 			return nil
 		},
 	}
@@ -329,6 +331,87 @@ func (m *Model) shiftFocused(ctx context.Context, delta int) {
 	m.setStatus("%s → %s", card.Spec.ID, status)
 	m.Reload(ctx)
 	m.focusFeature(card.Spec.ID)
+	m.offerDispatch(card, status)
+}
+
+// offerDispatch asks whether to start an agent on a feature that has just
+// entered in-progress.
+//
+// Starting work is exactly when an agent is useful, and it is also exactly when
+// the user has the context to decide how isolated it should be — so the board
+// asks once, here, rather than making worktrees a setting somebody has to find.
+// Declining is the first option and one keystroke away, because most moves are
+// a human picking up the work themselves.
+func (m *Model) offerDispatch(card *Card, status feature.Status) {
+	if status != feature.InProgress || card == nil {
+		return
+	}
+	if card.Active != nil {
+		return
+	}
+	if len(m.backend.Roles()) == 0 {
+		return
+	}
+	cfg := m.backend.Config()
+	options := []option{
+		{Value: dispatchNone, Label: "No — I will work on it", Description: "just move the card"},
+		{Value: dispatchHere, Label: "Agent, in the project", Description: "works directly in the working tree"},
+		{Value: dispatchWorktree, Label: "Agent, in a worktree", Description: "isolated checkout on the feature's own branch"},
+		{Value: dispatchPR, Label: "Agent, worktree + pull request", Description: "pushes the branch and opens a PR on success"},
+	}
+	m.picker = &picker{
+		title:    fmt.Sprintf("%s is now in progress", card.Spec.ID),
+		subtitle: fmt.Sprintf("%s — start an agent on it?", card.Spec.Title),
+		options:  options,
+		index:    defaultDispatchChoice(cfg),
+		onChoose: func(value string) error {
+			if value == dispatchNone {
+				return nil
+			}
+			yes, no := true, false
+			worktree, wantPR := &no, &no
+			switch value {
+			case dispatchWorktree:
+				worktree = &yes
+			case dispatchPR:
+				worktree, wantPR = &yes, &yes
+			}
+			run, err := m.backend.DispatchWith(context.Background(), card.Spec, "", "", worktree, wantPR)
+			if err != nil {
+				return err
+			}
+			if run.Worktree != nil {
+				m.setStatus("Dispatched %s as %s on %s", run.FeatureID, run.Role, run.Worktree.Branch)
+				return nil
+			}
+			m.setStatus("Dispatched %s as %s in %s", run.FeatureID, run.Role, run.PaneID)
+			return nil
+		},
+	}
+	m.view = ViewDispatchPicker
+}
+
+// The values offerDispatch's picker returns.
+const (
+	dispatchNone     = "none"
+	dispatchHere     = "here"
+	dispatchWorktree = "worktree"
+	dispatchPR       = "pr"
+)
+
+// defaultDispatchChoice preselects the row matching configuration, so a board
+// set up for worktrees opens on the worktree option — but never on a row that
+// starts an agent unasked. Declining stays the default when nothing is
+// configured.
+func defaultDispatchChoice(cfg *config.Config) int {
+	switch {
+	case cfg.Forge.Enabled && cfg.Worktree.Enabled:
+		return 3
+	case cfg.Worktree.Enabled:
+		return 2
+	default:
+		return 0
+	}
 }
 
 // openDispatchPicker asks which role to dispatch, pre-selecting the one the
@@ -371,6 +454,10 @@ func (m *Model) openDispatchPicker() {
 			run, err := m.backend.Dispatch(context.Background(), card.Spec, value, "", false)
 			if err != nil {
 				return err
+			}
+			if run.Worktree != nil {
+				m.setStatus("Dispatched %s as %s on %s", run.FeatureID, run.Role, run.Worktree.Branch)
+				return nil
 			}
 			m.setStatus("Dispatched %s as %s in %s", run.FeatureID, run.Role, run.PaneID)
 			return nil

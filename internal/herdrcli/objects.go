@@ -21,6 +21,9 @@ type Workspace struct {
 	Focused     bool   `json:"focused"`
 	TabCount    int    `json:"tab_count"`
 	PaneCount   int    `json:"pane_count"`
+	// Worktree is present only when the workspace is a linked worktree
+	// checkout rather than an ordinary directory.
+	Worktree *WorktreeWorkspace `json:"worktree,omitempty"`
 }
 
 // Tab is one entry of `herdr tab list`.
@@ -480,6 +483,33 @@ func IsPaneBusy(err error) bool {
 	message := strings.ToLower(herdrErr.Message)
 	return strings.Contains(message, "agent_pane_busy") ||
 		strings.Contains(message, "not an available shell")
+}
+
+// IsAgentNotReady reports whether `agent start` returned agent_not_ready.
+//
+// This is not a failure. Herdr's contract is explicit: the agent started and is
+// blocked on its own startup UI — a trust prompt, an update notice — and the
+// name stays valid for reading and for keys. A fresh worktree is a directory
+// the harness has never seen, so this is the ordinary case there, not the
+// exception.
+func IsAgentNotReady(err error) bool {
+	var herdrErr *Error
+	if !asError(err, &herdrErr) {
+		return false
+	}
+	message := strings.ToLower(herdrErr.Message)
+	return strings.Contains(message, "agent_not_ready") ||
+		strings.Contains(message, "not ready for prompts")
+}
+
+// IsAgentBlocked reports whether a prompt was refused because the agent is
+// sitting at an approval or question dialog.
+func IsAgentBlocked(err error) bool {
+	var herdrErr *Error
+	if !asError(err, &herdrErr) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(herdrErr.Message), "agent_blocked")
 }
 
 func isNotFound(err error) bool {

@@ -263,8 +263,15 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 		meta = append(meta, paint(m.palette.Accent, "@"+card.Spec.Owner))
 	}
 	if card.Active != nil {
-		meta = append(meta, paint(m.palette.RunState(card.Active.State),
-			card.Active.Role+" "+shortDuration(card.Active.Duration())))
+		label := card.Active.Role + " " + shortDuration(card.Active.Duration())
+		if card.Active.Worktree != nil {
+			// A worktree run is editing a different directory from the one
+			// the user is looking at; that is worth one character.
+			label = "⑂ " + label
+		}
+		meta = append(meta, paint(m.palette.RunState(card.Active.State), label))
+	} else if latest := latestRun(card.Runs); latest != nil && latest.PullRequest != nil && latest.PullRequest.Opened {
+		meta = append(meta, paint(m.palette.Succeeded, "PR"))
 	} else if criteria := card.Spec.AcceptanceCriteria(); len(criteria) > 0 {
 		done := 0
 		for _, criterion := range criteria {

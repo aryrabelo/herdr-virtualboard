@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/netors/herdr-virtualboard/internal/feature"
+	"github.com/netors/herdr-virtualboard/internal/git"
 )
 
 // ProjectFile is the per-project config filename, resolved against the project
@@ -47,6 +49,56 @@ type Config struct {
 	Placement string `toml:"placement"`
 	// Columns is the per-status pipeline policy.
 	Columns map[string]Column `toml:"columns"`
+	// Worktree configures isolated git checkouts for dispatched agents.
+	Worktree Worktree `toml:"worktree"`
+	// Forge configures pull-request creation.
+	Forge Forge `toml:"forge"`
+}
+
+// Worktree configures running an agent in an isolated git checkout rather than
+// in the project directory.
+type Worktree struct {
+	// Enabled makes a worktree the default for dispatches that do not say
+	// otherwise. It stays off by default: a worktree is a real directory on
+	// disk and a real branch, and creating either without being asked would
+	// be a surprise.
+	Enabled bool `toml:"enabled"`
+	// Branch is the branch-name template. `{id}`, `{id_lower}` and `{slug}`
+	// are substituted; the default matches VirtualBoard's own convention.
+	Branch string `toml:"branch"`
+	// Base is the branch features are cut from. Empty means the repository's
+	// default branch, resolved from the remote.
+	Base string `toml:"base"`
+	// Remote is the git remote to branch from and push to.
+	Remote string `toml:"remote"`
+}
+
+// Forge configures pull-request creation.
+type Forge struct {
+	// Enabled opens a pull request when a worktree run succeeds.
+	Enabled bool `toml:"enabled"`
+	// Draft opens the pull request as a draft. On by default: an agent's
+	// work should be looked at before it asks for review.
+	Draft bool `toml:"draft"`
+	// Kind overrides forge detection for a self-hosted instance whose
+	// hostname gives nothing away: "github", "forgejo", "gitea", "gitlab".
+	Kind string `toml:"kind"`
+	// Token authenticates the Forgejo and Gitea clients. GitHub uses the
+	// gh CLI's own credentials and needs nothing here. Empty falls back to
+	// $HVB_FORGE_TOKEN.
+	Token string `toml:"token"`
+	// BaseURL overrides the API root derived from the remote host.
+	BaseURL string `toml:"base_url"`
+}
+
+// ResolveToken returns the forge token, preferring configuration then the
+// environment. Keeping the environment as a fallback means a token never has
+// to be written into a file that might be committed.
+func (f Forge) ResolveToken() string {
+	if f.Token != "" {
+		return f.Token
+	}
+	return os.Getenv("HVB_FORGE_TOKEN")
 }
 
 // Column is the policy for one lifecycle status.
@@ -70,6 +122,28 @@ type Column struct {
 	OnFailure string `toml:"on_failure"`
 	// Timeout bounds a run in this status. Zero means no bound.
 	Timeout Duration `toml:"timeout"`
+	// Worktree dispatches runs from this column into an isolated checkout.
+	// Unset inherits the global setting; set here it wins.
+	Worktree *bool `toml:"worktree"`
+	// PR opens a pull request when a run from this column succeeds. Unset
+	// inherits the global setting.
+	PR *bool `toml:"pr"`
+}
+
+// UseWorktree resolves the column's worktree setting against the global one.
+func (c Column) UseWorktree(global bool) bool {
+	if c.Worktree != nil {
+		return *c.Worktree
+	}
+	return global
+}
+
+// UsePR resolves the column's pull-request setting against the global one.
+func (c Column) UsePR(global bool) bool {
+	if c.PR != nil {
+		return *c.PR
+	}
+	return global
 }
 
 // Duration is a TOML-friendly time.Duration parsed from strings like "45m".
@@ -102,6 +176,8 @@ func Default() Config {
 		StartTimeout:   Duration(90 * time.Second),
 		PromptTimeout:  Duration(10 * time.Minute),
 		Placement:      "overlay",
+		Worktree:       Worktree{Branch: git.BranchTemplate, Remote: "origin"},
+		Forge:          Forge{Draft: true},
 		Columns: map[string]Column{
 			string(feature.Backlog): {},
 			string(feature.InProgress): {
@@ -210,6 +286,24 @@ func mergeFile(cfg *Config, path string) error {
 	if meta.IsDefined("placement") {
 		cfg.Placement = overlay.Placement
 	}
+	for _, field := range []struct {
+		key   string
+		apply func()
+	}{
+		{"worktree.enabled", func() { cfg.Worktree.Enabled = overlay.Worktree.Enabled }},
+		{"worktree.branch", func() { cfg.Worktree.Branch = overlay.Worktree.Branch }},
+		{"worktree.base", func() { cfg.Worktree.Base = overlay.Worktree.Base }},
+		{"worktree.remote", func() { cfg.Worktree.Remote = overlay.Worktree.Remote }},
+		{"forge.enabled", func() { cfg.Forge.Enabled = overlay.Forge.Enabled }},
+		{"forge.draft", func() { cfg.Forge.Draft = overlay.Forge.Draft }},
+		{"forge.kind", func() { cfg.Forge.Kind = overlay.Forge.Kind }},
+		{"forge.token", func() { cfg.Forge.Token = overlay.Forge.Token }},
+		{"forge.base_url", func() { cfg.Forge.BaseURL = overlay.Forge.BaseURL }},
+	} {
+		if meta.IsDefined(strings.Split(field.key, ".")...) {
+			field.apply()
+		}
+	}
 	for name, column := range overlay.Columns {
 		base := cfg.Column(feature.Status(name))
 		if meta.IsDefined("columns", name, "auto") {
@@ -233,6 +327,12 @@ func mergeFile(cfg *Config, path string) error {
 		if meta.IsDefined("columns", name, "timeout") {
 			base.Timeout = column.Timeout
 		}
+		if meta.IsDefined("columns", name, "worktree") {
+			base.Worktree = column.Worktree
+		}
+		if meta.IsDefined("columns", name, "pr") {
+			base.PR = column.PR
+		}
 		if cfg.Columns == nil {
 			cfg.Columns = map[string]Column{}
 		}
@@ -242,8 +342,14 @@ func mergeFile(cfg *Config, path string) error {
 }
 
 // Validate rejects a configuration that would fail at dispatch time: an unknown
-// status, or a routing destination VirtualBoard does not allow.
+// status, a routing destination VirtualBoard does not allow, or a forge kind
+// hvb has no client for.
 func (c *Config) Validate() error {
+	switch git.Kind(strings.ToLower(c.Forge.Kind)) {
+	case "", git.GitHub, git.Forgejo, git.Gitea, git.GitLab, git.Unknown:
+	default:
+		return fmt.Errorf("config: forge.kind %q is not one of github, forgejo, gitea, gitlab", c.Forge.Kind)
+	}
 	for name, column := range c.Columns {
 		status, ok := feature.ParseStatus(name)
 		if !ok {

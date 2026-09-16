@@ -24,16 +24,21 @@ func newRunCommand(app *App) *cobra.Command {
 		newRunCancelCommand(app),
 		newRunFocusCommand(app),
 		newRunLogCommand(app),
+		newRunCleanupCommand(app),
 	)
 	return cmd
 }
 
 func newRunStartCommand(app *App) *cobra.Command {
 	var (
-		role  string
-		kind  string
-		focus bool
-		force bool
+		role       string
+		kind       string
+		focus      bool
+		force      bool
+		worktree   bool
+		noWorktree bool
+		pr         bool
+		noPR       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "start <FEATURE-ID>",
@@ -43,7 +48,11 @@ func newRunStartCommand(app *App) *cobra.Command {
 hvb claims the feature's vb lock, opens or reuses the feature's Herdr tab,
 splits a pane with the run's environment, starts the harness there, and submits
 the composed prompt. The role is inferred from the feature's labels and status
-unless --role says otherwise.`,
+unless --role says otherwise.
+
+With --worktree the agent works in an isolated git checkout on the feature's own
+branch, which Herdr opens as a linked workspace beside the project. Adding --pr
+pushes that branch and opens a pull request when the agent reports success.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := app.Resolve(); err != nil {
@@ -53,8 +62,21 @@ unless --role says otherwise.`,
 			if err != nil {
 				return err
 			}
+			wantWorktree, err := triState(worktree, noWorktree, "--worktree", "--no-worktree")
+			if err != nil {
+				return err
+			}
+			wantPR, err := triState(pr, noPR, "--pr", "--no-pr")
+			if err != nil {
+				return err
+			}
+			if pr && noWorktree {
+				return Usage("--pr needs a branch to open from; drop --no-worktree")
+			}
+
 			run, err := app.Dispatcher().Start(contextFor(cmd), dispatch.Request{
 				Spec: spec, Role: role, Kind: kind, Focus: focus, Force: force,
+				Worktree: wantWorktree, PR: wantPR,
 			})
 			if err != nil {
 				return err
@@ -63,8 +85,20 @@ unless --role says otherwise.`,
 				return nil
 			}
 			app.Print("Dispatched %s as %s (%s)", run.FeatureID, run.Role, run.Kind)
-			app.Print("  run   %s", run.ID)
-			app.Print("  pane  %s", run.PaneID)
+			app.Print("  run    %s", run.ID)
+			app.Print("  pane   %s", run.PaneID)
+			if run.Worktree != nil {
+				app.Print("  branch %s (from %s)", run.Worktree.Branch, run.Worktree.Base)
+				app.Print("  path   %s", run.Worktree.Path)
+			}
+			if run.PullRequest != nil {
+				app.Print("  a pull request will open when the agent reports success")
+			}
+			if run.PendingPrompt != "" {
+				app.Warn("hvb: the %s agent is waiting on its own startup dialog.", run.Kind)
+				app.Warn("     Answer it in the pane (`hvb run focus %s`); hvb submits the task", run.ID)
+				app.Warn("     as soon as the agent is ready. It never answers that dialog for you.")
+			}
 			return nil
 		},
 	}
@@ -72,7 +106,28 @@ unless --role says otherwise.`,
 	cmd.Flags().StringVar(&kind, "harness", "", "Herdr agent kind (see `hvb harness list`)")
 	cmd.Flags().BoolVar(&focus, "focus", false, "switch to the new agent pane")
 	cmd.Flags().BoolVar(&force, "force", false, "take the feature lock even if another owner holds it")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "run the agent in an isolated git worktree on the feature's branch")
+	cmd.Flags().BoolVar(&noWorktree, "no-worktree", false, "run in the project directory even if configuration enables worktrees")
+	cmd.Flags().BoolVar(&pr, "pr", false, "open a pull request when the agent reports success (implies --worktree)")
+	cmd.Flags().BoolVar(&noPR, "no-pr", false, "do not open a pull request even if configuration enables it")
 	return cmd
+}
+
+// triState turns a pair of opposing boolean flags into the tri-state the
+// dispatcher wants: nil when the user said nothing, so configuration decides.
+func triState(yes, no bool, yesFlag, noFlag string) (*bool, error) {
+	switch {
+	case yes && no:
+		return nil, Usage("%s and %s are mutually exclusive", yesFlag, noFlag)
+	case yes:
+		value := true
+		return &value, nil
+	case no:
+		value := false
+		return &value, nil
+	default:
+		return nil, nil
+	}
 }
 
 func newRunListCommand(app *App) *cobra.Command {
@@ -162,6 +217,23 @@ func newRunShowCommand(app *App) *cobra.Command {
 			if run.PaneID != "" {
 				app.Print("pane      %s (agent %s)", run.PaneID, run.AgentName)
 			}
+			if run.Worktree != nil {
+				app.Print("branch    %s (from %s)", run.Worktree.Branch, run.Worktree.Base)
+				app.Print("worktree  %s", run.Worktree.Path)
+			}
+			if pr := run.PullRequest; pr != nil {
+				switch {
+				case pr.Opened && pr.URL != "":
+					app.Print("pull req  %s", pr.URL)
+				case pr.Reason != "":
+					app.Print("pull req  not opened: %s", pr.Reason)
+				default:
+					app.Print("pull req  requested; opens when the run succeeds")
+				}
+			}
+			if run.PendingPrompt != "" {
+				app.Print("task      parked — the agent is at a startup dialog; answer it in the pane")
+			}
 			if run.Outcome != "" {
 				app.Print("outcome   %s", run.Outcome)
 			}
@@ -227,6 +299,19 @@ a blocked outcome moves it to blocked where the lifecycle allows.`,
 			app.Print("%s reported %s", completion.Run.FeatureID, completion.Run.Outcome)
 			if completion.Moved != "" {
 				app.Print("  moved to %s", completion.Moved)
+			}
+			if pr := completion.PullRequest; pr != nil {
+				switch {
+				case pr.Opened && pr.URL != "":
+					app.Print("  pull request %s", pr.URL)
+				case pr.Pushed:
+					app.Print("  branch pushed, but no pull request: %s", pr.Reason)
+					if pr.URL != "" {
+						app.Print("  open one here: %s", pr.URL)
+					}
+				case pr.Reason != "":
+					app.Print("  no pull request: %s", pr.Reason)
+				}
 			}
 			if completion.TransitionError != "" {
 				app.Warn("hvb: the feature was not moved: %s", completion.TransitionError)
@@ -357,6 +442,40 @@ func newRunLogCommand(app *App) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVarP(&lines, "lines", "n", 120, "how many lines to read")
+	return cmd
+}
+
+func newRunCleanupCommand(app *App) *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "cleanup [RUN-ID]",
+		Short: "Remove a finished run's worktree and close its workspace",
+		Long: `Remove a finished run's worktree checkout and close its Herdr workspace.
+
+Refuses while the checkout has uncommitted changes, because that work exists
+nowhere else — a worktree is separate from the main checkout by design. --force
+discards it.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := app.Resolve(); err != nil {
+				return err
+			}
+			run, err := resolveRun(app, args)
+			if err != nil {
+				return err
+			}
+			cleaned, err := app.Dispatcher().CleanupWorktree(contextFor(cmd), run.ID, force)
+			if err != nil {
+				return err
+			}
+			if app.Emit(cleaned) {
+				return nil
+			}
+			app.Print("Removed the worktree for %s", cleaned.FeatureID)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "discard uncommitted work and remove it anyway")
 	return cmd
 }
 

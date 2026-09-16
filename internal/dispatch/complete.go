@@ -39,6 +39,8 @@ func ParseOutcome(value string) (Outcome, bool) {
 // Completion is the result of finishing a run.
 type Completion struct {
 	Run *runs.Run `json:"run"`
+	// PullRequest is the outcome of opening one, when the run asked for it.
+	PullRequest *runs.PullRequest `json:"pull_request,omitempty"`
 	// Moved is the status the feature was transitioned to, empty when the
 	// column routed nowhere or the transition was refused.
 	Moved feature.Status `json:"moved,omitempty"`
@@ -58,7 +60,7 @@ func (d *Dispatcher) Complete(ctx context.Context, runID string, outcome Outcome
 		return nil, err
 	}
 	if run.State.Terminal() {
-		return &Completion{Run: run, Moved: feature.Status(run.MovedTo)}, nil
+		return &Completion{Run: run, Moved: feature.Status(run.MovedTo), PullRequest: run.PullRequest}, nil
 	}
 
 	state := runs.Succeeded
@@ -69,10 +71,26 @@ func (d *Dispatcher) Complete(ctx context.Context, runID string, outcome Outcome
 		return nil, err
 	}
 
+	// The pull request comes before the routing move. A reviewer arriving
+	// from the board should find the branch already published, and the
+	// spec's Links section is written here so the move that follows carries
+	// it into the next column.
+	if outcome == OutcomeSuccess && run.PullRequest != nil && !run.PullRequest.Opened {
+		pr := d.openPullRequest(ctx, run)
+		if updated, err := d.Store.Update(run.ID, func(r *runs.Run) error {
+			r.PullRequest = pr
+			return nil
+		}); err == nil {
+			run = updated
+		}
+		d.recordPullRequestLink(ctx, run, pr)
+	}
+
 	completion := &Completion{Run: run}
 	target, ok := d.route(run, outcome)
 	if !ok {
 		d.releaseLock(ctx, run.FeatureID)
+		completion.PullRequest = run.PullRequest
 		return completion, nil
 	}
 
@@ -81,6 +99,7 @@ func (d *Dispatcher) Complete(ctx context.Context, runID string, outcome Outcome
 		completion.TransitionError = err.Error()
 		d.note(run.ID, completion.TransitionError)
 		d.releaseLock(ctx, run.FeatureID)
+		completion.PullRequest = run.PullRequest
 		return completion, nil
 	}
 	completion.Moved = moved
@@ -91,6 +110,7 @@ func (d *Dispatcher) Complete(ctx context.Context, runID string, outcome Outcome
 		return nil, err
 	}
 	d.releaseLock(ctx, run.FeatureID)
+	completion.PullRequest = run.PullRequest
 	return completion, nil
 }
 
@@ -273,10 +293,40 @@ func (d *Dispatcher) reconcileOne(ctx context.Context, run *runs.Run, live map[s
 	if !ok {
 		return nil, nil
 	}
+	// A task parked because the harness was blocked at startup goes in as
+	// soon as the agent is ready for input. This is what makes a worktree
+	// dispatch self-heal after the user answers a trust prompt.
+	if run.PendingPrompt != "" {
+		switch agent.AgentStatus {
+		case herdrcli.StatusIdle, herdrcli.StatusDone:
+			return d.submitPending(ctx, run)
+		}
+		return nil, nil
+	}
 	if agent.AgentStatus == herdrcli.StatusDone && run.State == runs.Running {
 		return d.awaiting(ctx, run, "agent_done", "the harness finished its turn without reporting an outcome")
 	}
 	return nil, nil
+}
+
+// submitPending sends a prompt that was parked while the harness was blocked.
+func (d *Dispatcher) submitPending(ctx context.Context, run *runs.Run) (*runs.Run, error) {
+	target := run.AgentName
+	if target == "" {
+		target = run.PaneID
+	}
+	if err := d.Herdr.PromptAgent(ctx, target, run.PendingPrompt, false, 0); err != nil {
+		if herdrcli.IsAgentBlocked(err) {
+			// Still at a dialog; try again on the next pass.
+			return nil, nil
+		}
+		d.note(run.ID, fmt.Sprintf("could not submit the parked task: %v", err))
+		return nil, nil
+	}
+	return d.Store.Update(run.ID, func(r *runs.Run) error {
+		r.PendingPrompt = ""
+		return nil
+	})
 }
 
 // awaiting parks a run for human review without routing the feature. The

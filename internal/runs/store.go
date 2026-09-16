@@ -71,6 +71,18 @@ type Run struct {
 	AnchorPane  string `json:"anchor_pane,omitempty"`
 	AgentName   string `json:"agent_name,omitempty"`
 
+	// PendingPrompt is the prompt hvb has not been able to submit yet,
+	// because the harness was blocked on its own startup UI. Reconcile
+	// submits it once the agent settles, then clears this.
+	PendingPrompt string `json:"pending_prompt,omitempty"`
+
+	// Worktree describes the isolated checkout a run was dispatched into.
+	// Nil for a run that worked directly in the project directory.
+	Worktree *Worktree `json:"worktree,omitempty"`
+	// PullRequest records what came of opening one. Nil when none was asked
+	// for; present but not Opened when it was asked for and could not be.
+	PullRequest *PullRequest `json:"pull_request,omitempty"`
+
 	StartedAt  time.Time  `json:"started_at"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
 	Outcome    string     `json:"outcome,omitempty"`
@@ -78,6 +90,36 @@ type Run struct {
 	MovedTo    string     `json:"moved_to,omitempty"`
 	Comments   []Comment  `json:"comments,omitempty"`
 	LastErrors []string   `json:"last_errors,omitempty"`
+}
+
+// Worktree is the isolated checkout a run was dispatched into.
+type Worktree struct {
+	// Path is the checkout directory, which is also the agent's cwd.
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	Base   string `json:"base"`
+	Remote string `json:"remote"`
+	// WorkspaceID is the linked Herdr workspace Herdr opened for it.
+	WorkspaceID string `json:"workspace_id"`
+	// RepoRoot is the parent repository the worktree belongs to.
+	RepoRoot string `json:"repo_root"`
+	// Removed records that the checkout has been cleaned up, so the board
+	// stops offering to do it again.
+	Removed bool `json:"removed,omitempty"`
+}
+
+// PullRequest is the outcome of trying to open one.
+type PullRequest struct {
+	// Opened distinguishes a pull request that exists from a compare URL
+	// the user still has to click.
+	Opened bool   `json:"opened"`
+	URL    string `json:"url,omitempty"`
+	Number int    `json:"number,omitempty"`
+	// Reason explains anything other than a clean success.
+	Reason string `json:"reason,omitempty"`
+	// Pushed reports whether the branch reached the remote. A pull request
+	// cannot exist without it, but a push can succeed on its own.
+	Pushed bool `json:"pushed"`
 }
 
 // Comment is a note attached to a run, by an agent or a human.

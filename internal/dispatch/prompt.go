@@ -9,6 +9,7 @@ import (
 	"github.com/netors/herdr-virtualboard/internal/config"
 	"github.com/netors/herdr-virtualboard/internal/feature"
 	"github.com/netors/herdr-virtualboard/internal/roles"
+	"github.com/netors/herdr-virtualboard/internal/runs"
 )
 
 // Skill is the contract a dispatched agent is held to, embedded so `hvb skill`
@@ -26,6 +27,10 @@ type PromptInput struct {
 	RunID   string
 	// RelPath is the spec's workspace-relative path, as vb reports it.
 	RelPath string
+	// Worktree is the isolated checkout the agent is working in, or nil.
+	Worktree *runs.Worktree
+	// WantPR tells the agent hvb will open the pull request, so it does not.
+	WantPR bool
 }
 
 // BuildPrompt composes the prompt submitted to the agent after it starts.
@@ -49,6 +54,10 @@ func BuildPrompt(in PromptInput) string {
 	b.WriteString("## Your contract\n\n")
 	b.WriteString(strings.TrimSpace(stripFrontmatter(Skill)))
 	b.WriteString("\n\n")
+
+	if in.Worktree != nil {
+		b.WriteString(worktreePromptSection(in.Worktree, in.WantPR))
+	}
 
 	if instruction := strings.TrimSpace(in.Column.Prompt); instruction != "" {
 		fmt.Fprintf(&b, "## This stage (%s)\n\n%s\n\n", in.Spec.Status, instruction)

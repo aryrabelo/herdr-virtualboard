@@ -120,6 +120,29 @@ func (m *Model) detailLines(card *Card, width int) []string {
 				add("      %s", paint(m.palette.Dim, line))
 			}
 		}
+		if run.PendingPrompt != "" {
+			for _, line := range wrapText("waiting on the harness's startup dialog — answer it in the pane (o), then hvb submits the task", inner-8) {
+				add("      %s", paint(m.palette.Awaiting, line))
+			}
+		}
+		if run.Worktree != nil {
+			add("      %s %s", paint(m.palette.Dim, "branch"), run.Worktree.Branch)
+			if run.Worktree.Removed {
+				add("      %s", paint(m.palette.Dim, "worktree removed"))
+			} else {
+				add("      %s %s", paint(m.palette.Dim, "path  "), run.Worktree.Path)
+			}
+		}
+		if pr := run.PullRequest; pr != nil {
+			switch {
+			case pr.Opened && pr.URL != "":
+				add("      %s %s", paint(m.palette.Succeeded, "PR"), pr.URL)
+			case pr.Reason != "":
+				for _, line := range wrapText("no PR: "+pr.Reason, inner-8) {
+					add("      %s", paint(m.palette.Warn, line))
+				}
+			}
+		}
 		if run.MovedTo != "" {
 			add("      %s", paint(m.palette.Dim, "→ moved to "+run.MovedTo))
 		}
@@ -171,6 +194,8 @@ func (m *Model) renderHelp() []string {
 	key("d", "dispatch an agent onto the focused feature")
 	key("o", "focus the running agent's pane")
 	key("x", "cancel the active run")
+	add("  %s", paint(m.palette.Dim, "moving a card into in-progress offers to start one,"))
+	add("  %s", paint(m.palette.Dim, "in the project or in an isolated worktree branch"))
 
 	section("The lifecycle")
 	for _, status := range feature.Statuses {

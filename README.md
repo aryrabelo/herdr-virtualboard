@@ -114,6 +114,46 @@ The board reloads every few seconds, so a teammate's `vb move` or another agent 
 without you asking. Below about 108 columns it switches to a single-column layout with a lifecycle
 breadcrumb, so it stays usable in a narrow split or on a phone.
 
+### Starting work
+
+Moving a card into `in-progress` — with `m`, or `L` — asks one question:
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ FTR-0007 is now in progress                                  │
+├──────────────────────────────────────────────────────────────┤
+│ Add retry to the uploader — start an agent on it?            │
+│                                                              │
+│  ▸ No — I will work on it       just move the card           │
+│    Agent, in the project        works in the working tree    │
+│    Agent, in a worktree         isolated checkout, own branch│
+│    Agent, worktree + PR         pushes and opens a PR        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Declining is the default and one keystroke away, because most moves are a human
+picking the work up themselves. The preselected row follows your configuration,
+but never lands on one that starts an agent unless you asked for that.
+
+A **worktree** run gets its own checkout on `feature/FTR-0007/add-retry-to-the-uploader`,
+cut from the default branch and opened by Herdr as a linked workspace beside the
+project — so the agent edits a different directory from the one you are looking
+at, and the sidebar shows both. The card is marked `⑂` while it runs.
+
+With **+ PR**, a successful run pushes that branch and opens a pull request
+against the base, with the feature's acceptance criteria and the agent's commits
+in the description, and writes the link back into the spec's Links section.
+
+The same from the shell:
+
+```bash
+hvb run start FTR-0007 --worktree --pr
+hvb run cleanup FTR-0007            # remove the checkout when you are done
+```
+
+Nothing about this is on by default: no worktree is created, no branch is cut
+and no forge is contacted unless a dispatch asks for it.
+
 ### Dispatching
 
 Pressing `d` on a card opens the role picker, pre-selected from the feature's labels — `backend`
@@ -154,7 +194,7 @@ script can parse stdout unconditionally.
 | Noun | Verbs |
 |---|---|
 | `hvb feature` | `list`, `show`, `new`, `move`, `set`, `note`, `delete`, `validate` |
-| `hvb run` | `start`, `list`, `show`, `done`, `comment`, `cancel`, `focus`, `log` |
+| `hvb run` | `start`, `list`, `show`, `done`, `comment`, `cancel`, `focus`, `log`, `cleanup` |
 | `hvb role` | `list`, `show` |
 | `hvb harness` | `list` |
 | `hvb tui` · `hvb doctor` · `hvb skill` · `hvb version` | |
@@ -212,7 +252,26 @@ prompt     = "Implement this feature end to end."
 role       = "qa"
 on_success = "done"
 on_failure = "in-progress"
+
+[worktree]
+enabled = false                    # make worktree the default for dispatches
+branch  = "feature/{id}/{slug}"    # VirtualBoard's own convention
+base    = ""                       # empty = the repository's default branch
+
+[forge]
+enabled = false                    # open a PR when a worktree run succeeds
+draft   = true
+kind    = ""                       # override detection for a self-hosted forge
+token   = ""                       # Forgejo/Gitea; GitHub uses gh's own auth
 ```
+
+**Forges.** GitHub goes through the `gh` CLI, so it uses the credentials you
+already have and needs no token here. Forgejo and Gitea use their REST API and
+need one, from `forge.token` or `$HVB_FORGE_TOKEN`. Anything else — including a
+self-hosted forge on a hostname that gives nothing away — degrades to a compare
+URL you can click, which is also what happens when a token is missing or
+rejected. **A pull request that cannot be opened never fails the run**: the agent
+has already done the work and committed it.
 
 A route the lifecycle forbids is rejected when the file loads, not when a dispatch fails hours
 later. The project file lives beside `.virtualboard/` rather than inside it, because
@@ -232,6 +291,7 @@ make e2e        # end-to-end only
 The e2e suite is hermetic: stub `vb` and `herdr` binaries mean it never touches your Herdr session,
 never starts an agent, and never makes a provider call.
 
+- [`docs/worktrees.md`](docs/worktrees.md) — worktree dispatch, pull requests, and testing both locally
 - [`docs/design.md`](docs/design.md) — why there is no daemon, and what hvb does own
 - [`docs/herdr.md`](docs/herdr.md) — the verified Herdr contract, and how to re-verify it
 - [`docs/configuration.md`](docs/configuration.md) — configuration and environment

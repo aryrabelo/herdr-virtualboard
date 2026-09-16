@@ -22,7 +22,9 @@ pipeline, and there is no second list of steps to keep in sync.
 | `runs` | idempotent completion, concurrent writes, pruning, Herdr's agent-name grammar |
 | `roles` | charter loading, role suggestion precedence |
 | `config` | field-wise merging, and rejecting routes the lifecycle forbids |
-| `dispatch` | prompt composition, outcome routing, reconciliation |
+| `dispatch` | prompt composition, outcome routing, reconciliation, the pull-request path |
+| `git` | branch naming, remote parsing, push — against real repositories |
+| `forge` | GitHub through a stub `gh`, Forgejo through a stub HTTP server |
 | `tui` | rendering geometry, navigation, every overlay, and that colour costs no width |
 | `cli` | exit-code mapping, the JSON error envelope, command-tree completeness |
 
@@ -63,6 +65,7 @@ scenario can assert that the board changed rather than only that a command was c
 | `06-reconciliation` | a vanished pane and a silent harness both parking as `awaiting` |
 | `07-doctor` | the environment report, and refusing an unsupported Herdr |
 | `08-json-contract` | valid JSON on stdout, the error envelope on stderr, stdout empty on failure |
+| `09-worktree-pr` | a worktree run, a real push to a bare local remote, and the degraded-PR path |
 
 ### Why the stubs are not optional
 

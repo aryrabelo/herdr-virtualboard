@@ -72,6 +72,33 @@ func (f *fakeBackend) Dispatch(_ context.Context, spec *feature.Spec, role, kind
 		State: runs.Running, PaneID: "w1:p9", StartedAt: time.Now()}, nil
 }
 
+func (f *fakeBackend) DispatchWith(_ context.Context, spec *feature.Spec, role, kind string, worktree, pr *bool) (*runs.Run, error) {
+	if f.dispatchErr != nil {
+		return nil, f.dispatchErr
+	}
+	mode := "here"
+	if worktree != nil && *worktree {
+		mode = "worktree"
+	}
+	if pr != nil && *pr {
+		mode += "+pr"
+	}
+	f.dispatch = append(f.dispatch, fmt.Sprintf("%s/%s/%s", spec.ID, role, mode))
+
+	run := &runs.Run{ID: "r-new", FeatureID: spec.ID, Role: role, Kind: "claude",
+		State: runs.Running, PaneID: "w1:p9", StartedAt: time.Now()}
+	if worktree != nil && *worktree {
+		run.Worktree = &runs.Worktree{
+			Path: "/tmp/wt/" + spec.ID, Branch: "feature/" + spec.ID + "/x",
+			Base: "main", Remote: "origin", WorkspaceID: "w9",
+		}
+	}
+	if pr != nil && *pr {
+		run.PullRequest = &runs.PullRequest{}
+	}
+	return run, nil
+}
+
 func (f *fakeBackend) Cancel(_ context.Context, runID string) error {
 	f.cancelled = append(f.cancelled, runID)
 	return nil
@@ -641,5 +668,194 @@ func TestNoticeWrapsToNarrowTerminals(t *testing.T) {
 				t.Errorf("%d columns: line %d is %d wide", width, index, got)
 			}
 		}
+	}
+}
+
+// Moving a card into in-progress is exactly when an agent is useful and exactly
+// when the user has the context to decide how isolated it should be, so the
+// board asks once, there.
+func TestMovingIntoInProgressOffersAnAgent(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Backlog))
+	model := newTestModel(t, backend, 140, 30)
+	ctx := context.Background()
+
+	model.Handle(ctx, Key{Rune: 'm'})
+	model.Handle(ctx, Key{Name: KeyEnter}) // backlog -> in-progress
+
+	if model.view != ViewDispatchPicker || model.picker == nil {
+		t.Fatalf("view = %v, want the dispatch offer", model.view)
+	}
+	values := make([]string, 0, len(model.picker.options))
+	for _, entry := range model.picker.options {
+		values = append(values, entry.Value)
+	}
+	want := []string{dispatchNone, dispatchHere, dispatchWorktree, dispatchPR}
+	if strings.Join(values, ",") != strings.Join(want, ",") {
+		t.Fatalf("options = %v, want %v", values, want)
+	}
+	// Declining must be the default and one keystroke away: most moves are a
+	// human picking the work up themselves.
+	if chosen, _ := model.picker.current(); chosen.Value != dispatchNone {
+		t.Errorf("preselected %q, want %q", chosen.Value, dispatchNone)
+	}
+}
+
+func TestDecliningTheOfferStartsNothing(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Backlog))
+	model := newTestModel(t, backend, 140, 30)
+	ctx := context.Background()
+
+	model.Handle(ctx, Key{Rune: 'm'})
+	model.Handle(ctx, Key{Name: KeyEnter})
+	model.Handle(ctx, Key{Name: KeyEnter}) // accept the default: no agent
+
+	if len(backend.dispatch) != 0 {
+		t.Fatalf("declining dispatched something: %v", backend.dispatch)
+	}
+	if len(backend.moves) != 1 {
+		t.Fatalf("the move itself should still have happened: %v", backend.moves)
+	}
+}
+
+func TestOfferCanStartAWorktreeRunWithAPullRequest(t *testing.T) {
+	cases := map[string]struct {
+		downs int
+		want  string
+	}{
+		"in the project": {1, "FTR-0001//here"},
+		"in a worktree":  {2, "FTR-0001//worktree"},
+		"worktree + PR":  {3, "FTR-0001//worktree+pr"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			backend := newFakeBackend(spec("FTR-0001", "A", feature.Backlog))
+			model := newTestModel(t, backend, 140, 30)
+			ctx := context.Background()
+
+			model.Handle(ctx, Key{Rune: 'm'})
+			model.Handle(ctx, Key{Name: KeyEnter})
+			for i := 0; i < tc.downs; i++ {
+				model.Handle(ctx, Key{Name: KeyDown})
+			}
+			model.Handle(ctx, Key{Name: KeyEnter})
+
+			if len(backend.dispatch) != 1 || backend.dispatch[0] != tc.want {
+				t.Fatalf("dispatch = %v, want [%s]", backend.dispatch, tc.want)
+			}
+		})
+	}
+}
+
+// A board configured for worktrees should open on that row — but never on one
+// that starts an agent when nothing is configured.
+func TestOfferPreselectsFromConfiguration(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Backlog))
+	backend.cfg.Worktree.Enabled = true
+	backend.cfg.Forge.Enabled = true
+	model := newTestModel(t, backend, 140, 30)
+	ctx := context.Background()
+
+	model.Handle(ctx, Key{Rune: 'm'})
+	model.Handle(ctx, Key{Name: KeyEnter})
+
+	if chosen, _ := model.picker.current(); chosen.Value != dispatchPR {
+		t.Fatalf("preselected %q, want %q", chosen.Value, dispatchPR)
+	}
+}
+
+// Shifting with L into in-progress is the same transition and gets the same
+// offer; only the keystroke differs.
+func TestShiftIntoInProgressAlsoOffers(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Backlog))
+	model := newTestModel(t, backend, 140, 30)
+	model.Handle(context.Background(), Key{Rune: 'L'})
+
+	if model.view != ViewDispatchPicker {
+		t.Fatalf("view = %v, want the dispatch offer", model.view)
+	}
+}
+
+// Moves that are not the start of work must not interrupt with an offer.
+func TestOtherMovesDoNotOffer(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Review))
+	model := newTestModel(t, backend, 140, 30)
+	ctx := context.Background()
+
+	model.Handle(ctx, Key{Rune: 'm'})
+	// review's first legal destination is in-progress; pick `done` instead.
+	model.Handle(ctx, Key{Name: KeyDown})
+	model.Handle(ctx, Key{Name: KeyEnter})
+
+	if model.view == ViewDispatchPicker {
+		t.Fatal("moving to done must not offer to start an agent")
+	}
+}
+
+// A feature already being worked must not be offered a second agent.
+func TestOfferIsSkippedWhenARunIsActive(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Backlog))
+	backend.runs = []*runs.Run{{
+		ID: "r1", FeatureID: "FTR-0001", State: runs.Running,
+		Role: "backend_dev", StartedAt: time.Now(),
+	}}
+	model := newTestModel(t, backend, 140, 30)
+	ctx := context.Background()
+
+	model.Handle(ctx, Key{Rune: 'm'})
+	model.Handle(ctx, Key{Name: KeyEnter})
+
+	if model.view == ViewDispatchPicker {
+		t.Fatal("a feature with a live run must not be offered another agent")
+	}
+}
+
+// The board should say when a run is editing a different directory from the one
+// the user is looking at.
+func TestWorktreeRunIsMarkedOnTheCard(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.InProgress))
+	backend.runs = []*runs.Run{{
+		ID: "r1", FeatureID: "FTR-0001", State: runs.Running, Role: "backend_dev",
+		StartedAt: time.Now(),
+		Worktree:  &runs.Worktree{Path: "/tmp/wt", Branch: "feature/FTR-0001/a", Base: "main"},
+	}}
+	model := newTestModel(t, backend, 140, 30)
+	if !strings.Contains(screen(model), "⑂") {
+		t.Errorf("a worktree run should be marked on the board:\n%s", screen(model))
+	}
+}
+
+func TestDetailShowsTheBranchAndPullRequest(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Review))
+	backend.runs = []*runs.Run{{
+		ID: "r1", FeatureID: "FTR-0001", State: runs.Succeeded, Role: "backend_dev",
+		Kind: "claude", Outcome: "success", StartedAt: time.Now().Add(-time.Hour),
+		Worktree:    &runs.Worktree{Path: "/tmp/wt", Branch: "feature/FTR-0001/a", Base: "main"},
+		PullRequest: &runs.PullRequest{Opened: true, URL: "https://example/pull/7", Number: 7, Pushed: true},
+	}}
+	model := newTestModel(t, backend, 130, 40)
+	model.Handle(context.Background(), Key{Name: KeyEnter})
+
+	out := screen(model)
+	for _, want := range []string{"feature/FTR-0001/a", "https://example/pull/7"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("detail is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A pull request that could not be opened has to say why, in the place the user
+// is already looking.
+func TestDetailExplainsAFailedPullRequest(t *testing.T) {
+	backend := newFakeBackend(spec("FTR-0001", "A", feature.Review))
+	backend.runs = []*runs.Run{{
+		ID: "r1", FeatureID: "FTR-0001", State: runs.Succeeded, Role: "qa",
+		StartedAt: time.Now(), Worktree: &runs.Worktree{Branch: "b", Base: "main"},
+		PullRequest: &runs.PullRequest{Pushed: true, Reason: "no API token for forgejo.example"},
+	}}
+	model := newTestModel(t, backend, 130, 40)
+	model.Handle(context.Background(), Key{Name: KeyEnter})
+
+	if !strings.Contains(screen(model), "no API token") {
+		t.Errorf("the detail view should explain the failure:\n%s", screen(model))
 	}
 }

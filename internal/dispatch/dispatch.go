@@ -24,6 +24,8 @@ type Dispatcher struct {
 	VB        *vb.Client
 	Store     *runs.Store
 	Roles     []roles.Role
+	// GitBin overrides the git executable, for tests.
+	GitBin string
 	// SelfRunID is the run whose agent is the caller, from $HVB_RUN_ID.
 	// Reconcile never parks it: an agent asking about its own run is
 	// definitionally still alive, and parking it would be the board
@@ -43,6 +45,34 @@ type Request struct {
 	Focus bool
 	// Force takes the vb lock even when another owner holds it.
 	Force bool
+	// Worktree runs the agent in an isolated checkout. Nil inherits the
+	// column's setting, then the global one — the tri-state matters because
+	// "the user did not say" and "the user said no" must resolve
+	// differently against a config that defaults it on.
+	Worktree *bool
+	// PR opens a pull request when the run succeeds. Nil inherits.
+	PR *bool
+}
+
+// wantsWorktree resolves the tri-state against configuration.
+func (d *Dispatcher) wantsWorktree(req Request, column config.Column) bool {
+	if req.Worktree != nil {
+		return *req.Worktree
+	}
+	return column.UseWorktree(d.Config.Worktree.Enabled)
+}
+
+// wantsPR resolves the tri-state against configuration. A pull request without
+// a worktree is meaningless — there would be no branch to open it from — so it
+// is only ever true alongside one.
+func (d *Dispatcher) wantsPR(req Request, column config.Column, worktree bool) bool {
+	if !worktree {
+		return false
+	}
+	if req.PR != nil {
+		return *req.PR
+	}
+	return column.UsePR(d.Config.Forge.Enabled)
 }
 
 // ErrLocked reports that another owner holds the feature's vb lock.
@@ -86,6 +116,9 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 		return nil, err
 	}
 
+	useWorktree := d.wantsWorktree(req, column)
+	wantPR := d.wantsPR(req, column, useWorktree)
+
 	run := &runs.Run{
 		ID:        runs.NewID(req.Spec.ID),
 		FeatureID: req.Spec.ID,
@@ -96,6 +129,24 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 		State:     runs.Queued,
 		StartedAt: time.Now().UTC(),
 	}
+	if wantPR {
+		// Recorded at dispatch so a completion knows a pull request was
+		// asked for even if the configuration changed in between.
+		run.PullRequest = &runs.PullRequest{}
+	}
+
+	// The worktree is cut before the run is stored: a failure here means no
+	// dispatch happened at all, and leaving a queued run behind for a branch
+	// that was never created would be a lie.
+	if useWorktree {
+		worktree, err := d.prepareWorktree(ctx, req.Spec)
+		if err != nil {
+			d.releaseLock(ctx, req.Spec.ID)
+			return nil, err
+		}
+		run.Worktree = worktree
+	}
+
 	if err := d.Store.Append(run); err != nil {
 		return nil, err
 	}
@@ -111,14 +162,29 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 }
 
 func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, role roles.Role, column config.Column, kind string) error {
-	workspaceID, err := d.resolveWorkspace(ctx)
-	if err != nil {
-		return err
+	// A worktree run already has its workspace: the linked one Herdr opened
+	// for the checkout. Only a plain run has to find or create one.
+	workspaceID := ""
+	cwd := d.Workspace.Root
+	if run.Worktree != nil {
+		workspaceID, cwd = run.Worktree.WorkspaceID, run.Worktree.Path
+	} else {
+		var err error
+		if workspaceID, err = d.resolveWorkspace(ctx); err != nil {
+			return err
+		}
 	}
 
 	env := Env(req.Spec, run.ID, role.Key, d.Workspace.Root, column)
+	if run.Worktree != nil {
+		// The agent works in the checkout, but the board it reports to is
+		// still the one in the main repository, so the two are separate.
+		env["HVB_WORKTREE"] = run.Worktree.Path
+		env["HVB_BRANCH"] = run.Worktree.Branch
+		env["HVB_BASE_BRANCH"] = run.Worktree.Base
+	}
 
-	tabID, anchorID, err := d.resolveTab(ctx, workspaceID, run, env)
+	tabID, anchorID, err := d.resolveTab(ctx, workspaceID, run, env, cwd)
 	if err != nil {
 		return err
 	}
@@ -129,7 +195,7 @@ func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, rol
 		return err
 	}
 
-	pane, err := d.Herdr.SplitPane(ctx, anchorID, "right", d.Workspace.Root, env, req.Focus)
+	pane, err := d.Herdr.SplitPane(ctx, anchorID, "right", cwd, env, req.Focus)
 	if err != nil {
 		return fmt.Errorf("split run pane: %w", err)
 	}
@@ -143,7 +209,8 @@ func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, rol
 	// Best-effort cosmetics: a pane that could not be relabelled still runs.
 	_ = d.Herdr.RenamePane(ctx, pane.PaneID, runs.PaneLabel(run.FeatureID, role.Key))
 
-	if err := d.startAgent(ctx, agentName, kind, pane.PaneID); err != nil {
+	blocked, err := d.startAgent(ctx, agentName, kind, pane.PaneID)
+	if err != nil {
 		return fmt.Errorf("start %s agent: %w", kind, err)
 	}
 
@@ -167,16 +234,45 @@ func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, rol
 		charter = ""
 	}
 	prompt := BuildPrompt(PromptInput{
-		Spec:    req.Spec,
-		Role:    role,
-		Charter: charter,
-		Column:  column,
-		RunID:   run.ID,
-		RelPath: d.Workspace.Rel(req.Spec.Path),
+		Spec:     req.Spec,
+		Role:     role,
+		Charter:  charter,
+		Column:   column,
+		RunID:    run.ID,
+		RelPath:  d.Workspace.Rel(req.Spec.Path),
+		Worktree: run.Worktree,
+		WantPR:   run.PullRequest != nil,
 	})
-	if err := d.Herdr.PromptAgent(ctx, agentName, prompt, false, 0); err != nil {
-		return fmt.Errorf("submit prompt: %w", err)
+	return d.submitPrompt(ctx, run.ID, agentName, prompt, blocked)
+}
+
+// submitPrompt sends the task, deferring it while the harness is blocked.
+//
+// hvb never answers a startup dialog itself. Whether to trust a directory is
+// the user's decision, and a board that clicks "yes" on their behalf would be
+// making a security choice nobody asked it to make. Instead the prompt is
+// parked on the run and Reconcile submits it once the agent settles.
+func (d *Dispatcher) submitPrompt(ctx context.Context, runID, agentName, prompt string, blocked bool) error {
+	if !blocked {
+		if err := d.Herdr.PromptAgent(ctx, agentName, prompt, false, 0); err != nil {
+			if !herdrcli.IsAgentBlocked(err) {
+				return fmt.Errorf("submit prompt: %w", err)
+			}
+			blocked = true
+		}
 	}
+	if !blocked {
+		return nil
+	}
+	_, err := d.Store.Update(runID, func(r *runs.Run) error {
+		r.PendingPrompt = prompt
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	d.note(runID, "the harness is waiting on its own startup dialog — answer it in the pane "+
+		"(`hvb run focus`) and hvb will submit the task automatically")
 	return nil
 }
 
@@ -198,7 +294,7 @@ func (d *Dispatcher) resolveWorkspace(ctx context.Context) (string, error) {
 // resolveTab reuses the feature's existing tab when one is open, so repeated
 // runs on a feature stay in one place. It returns the tab and an anchor pane
 // inside it that is safe to split from.
-func (d *Dispatcher) resolveTab(ctx context.Context, workspaceID string, run *runs.Run, env map[string]string) (tabID, anchorID string, err error) {
+func (d *Dispatcher) resolveTab(ctx context.Context, workspaceID string, run *runs.Run, env map[string]string, cwd string) (tabID, anchorID string, err error) {
 	label := runs.TabLabel(run.FeatureID)
 	tabs, err := d.Herdr.Tabs(ctx, workspaceID)
 	if err != nil {
@@ -208,14 +304,14 @@ func (d *Dispatcher) resolveTab(ctx context.Context, workspaceID string, run *ru
 		if tab.Label != label {
 			continue
 		}
-		anchor, err := d.anchorInTab(ctx, tab.TabID, run, env)
+		anchor, err := d.anchorInTab(ctx, tab.TabID, run, env, cwd)
 		if err != nil {
 			return "", "", err
 		}
 		return tab.TabID, anchor, nil
 	}
 
-	tab, root, err := d.Herdr.CreateTab(ctx, workspaceID, d.Workspace.Root, label, env, false)
+	tab, root, err := d.Herdr.CreateTab(ctx, workspaceID, cwd, label, env, false)
 	if err != nil {
 		return "", "", fmt.Errorf("create tab: %w", err)
 	}
@@ -227,7 +323,7 @@ func (d *Dispatcher) resolveTab(ctx context.Context, workspaceID string, run *ru
 // hosting a live agent is never chosen: `agent start` requires an available
 // shell, and splitting from a busy harness pane is how two runs end up fighting
 // over one terminal.
-func (d *Dispatcher) anchorInTab(ctx context.Context, tabID string, run *runs.Run, env map[string]string) (string, error) {
+func (d *Dispatcher) anchorInTab(ctx context.Context, tabID string, run *runs.Run, env map[string]string, cwd string) (string, error) {
 	panes, err := d.Herdr.Panes(ctx, "")
 	if err != nil {
 		return "", fmt.Errorf("list panes: %w", err)
@@ -252,7 +348,7 @@ func (d *Dispatcher) anchorInTab(ctx context.Context, tabID string, run *runs.Ru
 		if pane.TabID != tabID {
 			continue
 		}
-		anchor, err := d.Herdr.SplitPane(ctx, pane.PaneID, "down", d.Workspace.Root, env, false)
+		anchor, err := d.Herdr.SplitPane(ctx, pane.PaneID, "down", cwd, env, false)
 		if err != nil {
 			return "", fmt.Errorf("create anchor pane: %w", err)
 		}
@@ -319,20 +415,30 @@ func (d *Dispatcher) resolveKind(req Request, column config.Column) string {
 // pane split microseconds ago is never one yet. Because hvb created this pane
 // itself and nothing else can be using it, retrying is safe here in a way it
 // would not be for a pane the user is typing in.
-func (d *Dispatcher) startAgent(ctx context.Context, name, kind, paneID string) error {
+//
+// The second result reports that the agent started but is blocked on its own
+// startup UI. That is not a failure: the agent is live, its name is valid, and
+// a human answering the dialog is all that stands between it and working. A
+// fresh worktree is a directory the harness has never seen, so on that path it
+// is the ordinary case.
+func (d *Dispatcher) startAgent(ctx context.Context, name, kind, paneID string) (blocked bool, err error) {
 	deadline := time.Now().Add(paneReadyWait)
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		lastErr = d.Herdr.StartAgent(ctx, name, kind, paneID, d.Config.StartTimeout.Duration(), nil)
-		if lastErr == nil || !herdrcli.IsPaneBusy(lastErr) {
-			return lastErr
+	for {
+		err = d.Herdr.StartAgent(ctx, name, kind, paneID, d.Config.StartTimeout.Duration(), nil)
+		switch {
+		case err == nil:
+			return false, nil
+		case herdrcli.IsAgentNotReady(err):
+			return true, nil
+		case !herdrcli.IsPaneBusy(err):
+			return false, err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%w (the pane never reached an interactive prompt within %s)", lastErr, paneReadyWait)
+			return false, fmt.Errorf("%w (the pane never reached an interactive prompt within %s)", err, paneReadyWait)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(paneReadyPoll):
 		}
 	}

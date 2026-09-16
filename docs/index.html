@@ -178,7 +178,7 @@ description = <span class="s">"open the VirtualBoard kanban (overlay)"</span></c
 <p>Moving a card into <code>in-progress</code> — with <code>m</code>, or <code>L</code> — asks one question.</p>
 
 <figure>
-  <img src="assets/move-picker.png" alt="The move picker overlaying the board: Move FTR-0115, with in-progress selectable and blocked, review and done greyed out, each annotated 'no backlog → blocked transition' and so on.">
+  <img src="assets/move-picker.png" alt="The move picker overlaying the board: Move FTR-0043, with in-progress selectable and blocked, review and done greyed out, each annotated with its reason such as 'no backlog to review transition'.">
   <figcaption>
     <b>The move picker.</b> Illegal destinations are shown and greyed out, each with the reason —
     <code>no backlog → review transition</code> — because an absent option looks like a bug, while a
@@ -189,9 +189,9 @@ description = <span class="s">"open the VirtualBoard kanban (overlay)"</span></c
 <p>Once the move lands, a second question follows:</p>
 
 <pre><code>┌──────────────────────────────────────────────────────────────┐
-│ FTR-0115 is now in progress                                  │
+│ FTR-0043 is now in progress                                  │
 ├──────────────────────────────────────────────────────────────┤
-│ RelayFlow: public multi-arch image — start an agent on it?   │
+│ Retry failed uploads with exponential backoff                │
 │                                                              │
 │  <span class="k">▸ No — I will work on it</span>       just move the card           │
 │    Agent, in the project        works in the project tree    │
@@ -212,7 +212,7 @@ description = <span class="s">"open the VirtualBoard kanban (overlay)"</span></c
 
 <p>
   A <strong>worktree</strong> run gets its own checkout on
-  <code>feature/FTR-0115/relayflow-public-multi-arch-image</code>, cut from the default branch and
+  <code>feature/FTR-0043/retry-failed-uploads-with-exponential-backoff</code>, cut from the default branch and
   opened by Herdr as a linked workspace beside the project — so the agent edits a different
   directory from the one you are looking at, and the sidebar shows both. The card carries a
   branch marker (<code>⑂</code>) while it runs.
@@ -223,8 +223,8 @@ description = <span class="s">"open the VirtualBoard kanban (overlay)"</span></c
   writes the link back into the spec's Links section.
 </p>
 
-<pre><code><span class="k">hvb</span> run start FTR-0115 <span class="f">--worktree</span> <span class="f">--pr</span>
-<span class="k">hvb</span> run cleanup FTR-0115            <span class="c"># remove the checkout when you are done</span></code></pre>
+<pre><code><span class="k">hvb</span> run start FTR-0043 <span class="f">--worktree</span> <span class="f">--pr</span>
+<span class="k">hvb</span> run cleanup FTR-0043            <span class="c"># remove the checkout when you are done</span></code></pre>
 
 <h3>Forges</h3>
 

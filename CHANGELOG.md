@@ -34,11 +34,17 @@ First release.
 - **Configuration** at `~/.config/herdr-virtualboard/config.toml` and `.hvb.toml`, merged field by
   field, with routes validated against the lifecycle at load time.
 
+- **A notice screen** for every startup failure. An overlay pane whose command exits immediately is
+  invisible, so a missing workspace, a missing `vb`, or an unsupported Herdr draws an explanation and
+  waits rather than flickering and vanishing.
+
 ### Notes
 
 - Requires exactly Herdr **0.9.0** (socket protocol 22). The version gate is policy, not
   negotiation; only cleanup of panes hvb already owns is exempt.
 - A freshly split pane is not an available shell until its shell reaches a prompt, so `agent start`
   is retried for up to ten seconds.
+- A plugin pane inherits the focused pane's working directory, so the board opens on whatever
+  project you are looking at.
 
 [0.1.0]: https://github.com/netors/herdr-virtualboard/releases/tag/v0.1.0

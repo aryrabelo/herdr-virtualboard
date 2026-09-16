@@ -100,3 +100,20 @@ From `herdr --skill`, and worth restating because they are easy to violate by ac
 - Parse ids out of JSON responses. Never derive them from ordering or from examples.
 - Do not close workspaces, tabs, or panes hvb did not create.
 - `--no-focus` for anything the user did not explicitly ask to be taken to.
+
+## Plugin panes
+
+A plugin pane opened by an action inherits **the focused pane's working directory**, not the plugin
+root. That is what makes the board follow whatever project you are looking at, and it is why
+`scripts/open-board.sh` passes no `--cwd`. Verified by reading `plugin_pane.pane.cwd` out of a live
+`plugin action invoke`, which also returns the invocation `context` — `focused_pane_cwd`,
+`workspace_cwd`, and the ids around them.
+
+An overlay pane whose command exits immediately is **invisible**: it opens, the process ends, and
+the user sees a flicker with no explanation. Anything that stops `hvb tui` from starting therefore
+renders a notice screen and waits for a keypress rather than returning an error. See
+`internal/tui/message.go`.
+
+When reading a pane running a full-screen TUI, remember that `--lines N` returns the **last** N rows
+of the viewport. A board's content is at the top, so `--lines 30` on a 54-row pane shows nothing but
+blank rows. Ask for more rows than the pane has.

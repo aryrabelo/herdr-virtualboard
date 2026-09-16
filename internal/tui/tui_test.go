@@ -609,3 +609,37 @@ func TestTinyTerminalDegradesGracefully(t *testing.T) {
 		t.Errorf("a terminal below the minimum should say so: %v", lines)
 	}
 }
+
+// An overlay pane that exits immediately is invisible: the user presses a key,
+// something flashes, and nothing explains itself. Every startup failure must
+// become a screen with an explanation and a way out.
+func TestNoticeRendersAnExplanationAndAWayOut(t *testing.T) {
+	notice := NoWorkspaceNotice("/some/where", fmt.Errorf("no VirtualBoard workspace found"))
+	lines := renderNotice(notice, Palette{}, 100, 24)
+
+	if len(lines) != 24 {
+		t.Fatalf("got %d lines, want 24", len(lines))
+	}
+	for index, line := range lines {
+		if got := displayWidth(line); got != 100 {
+			t.Errorf("line %d is %d columns wide", index, got)
+		}
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"No VirtualBoard workspace here", "/some/where", "vb init", "press q to close"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the notice is missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestNoticeWrapsToNarrowTerminals(t *testing.T) {
+	notice := NoWorkspaceNotice("/a/very/long/path/that/keeps/going/and/going", fmt.Errorf("boom"))
+	for _, width := range []int{120, 80, 48, 32} {
+		for index, line := range renderNotice(notice, Palette{}, width, 20) {
+			if got := displayWidth(line); got != width {
+				t.Errorf("%d columns: line %d is %d wide", width, index, got)
+			}
+		}
+	}
+}

@@ -9,16 +9,11 @@
 [Herdr](https://herdr.dev) — where moving a card runs `vb`, and dispatching one starts a
 VirtualBoard role agent in a visible pane.**
 
-```text
- BACKLOG 3        IN PROGRESS 2      BLOCKED 1        REVIEW 2         DONE 7
- ───────────      ───────────        ───────────      ───────────      ───────────
-   0012 Rate…       ▶ 0007 Add re…     ? 0004 OAuth…    0009 Export…     ✓ 0001 Login
-   P1 M             P0 L @alice        P2 M             P1 S             P2 S
-                      backend_dev 4m     waiting on…      1/3
-   0014 Audit…      ▶ 0011 Search…                     0010 Search…     ✓ 0002 Signup
-   P2 S             P1 M @agent                          P2 M             P1 M
-                      frontend_dev 1m                      2/2
-```
+<p align="center">
+  <img src="docs/assets/board.png" alt="The hvb board: five columns — backlog, in progress, blocked, review, done — each card showing its feature number, title, priority, complexity, owner and acceptance-criteria progress." width="100%">
+</p>
+
+**📖 [Full documentation](https://netors.github.io/herdr-virtualboard/)**
 
 ## Why this exists
 
@@ -134,6 +129,14 @@ Moving a card into `in-progress` — with `m`, or `L` — asks one question:
 Declining is the default and one keystroke away, because most moves are a human
 picking the work up themselves. The preselected row follows your configuration,
 but never lands on one that starts an agent unless you asked for that.
+
+The move itself is lifecycle-checked first — illegal destinations are shown and
+greyed out with the reason, because an absent option looks like a bug while a
+disabled one teaches the lifecycle:
+
+<p align="center">
+  <img src="docs/assets/move-picker.png" alt="The move picker overlaying the board: in-progress is selectable; blocked, review and done are greyed out, each annotated with the reason such as 'no backlog to review transition'." width="100%">
+</p>
 
 A **worktree** run gets its own checkout on `feature/FTR-0007/add-retry-to-the-uploader`,
 cut from the default branch and opened by Herdr as a linked workspace beside the

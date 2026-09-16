@@ -13,8 +13,9 @@ func TestParseRemote(t *testing.T) {
 		{"git@github.com:netors/herdr-virtualboard.git", GitHub, "github.com", "netors", "herdr-virtualboard"},
 		{"https://github.com/netors/herdr-virtualboard.git", GitHub, "github.com", "netors", "herdr-virtualboard"},
 		{"https://github.com/netors/herdr-virtualboard", GitHub, "github.com", "netors", "herdr-virtualboard"},
-		// The real shape of the user's Forgejo remote: ssh:// with a port.
-		{"ssh://git@forgejo.astucia.aios:2222/AstuciaAI/aios.git", Forgejo, "forgejo.astucia.aios", "AstuciaAI", "aios"},
+		// A self-hosted Forgejo over ssh:// with a non-default port — the
+		// shape that broke naive url.Parse handling.
+		{"ssh://git@forgejo.internal.example:2222/TeamOrg/service.git", Forgejo, "forgejo.internal.example", "TeamOrg", "service"},
 		{"git@gitlab.com:group/project.git", GitLab, "gitlab.com", "group", "project"},
 		{"https://gitea.example.com/team/thing.git", Gitea, "gitea.example.com", "team", "thing"},
 		// A self-hosted forge on a neutral hostname is genuinely unknowable
@@ -37,14 +38,14 @@ func TestParseRemote(t *testing.T) {
 // A port in an ssh:// URL must not end up in the host, or every derived web
 // and API URL is wrong.
 func TestParseRemoteDropsThePort(t *testing.T) {
-	remote, err := ParseRemote("ssh://git@forgejo.astucia.aios:2222/AstuciaAI/aios.git")
+	remote, err := ParseRemote("ssh://git@forgejo.internal.example:2222/TeamOrg/service.git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.Host != "forgejo.astucia.aios" {
+	if remote.Host != "forgejo.internal.example" {
 		t.Fatalf("Host = %q, want the port stripped", remote.Host)
 	}
-	if got := remote.WebURL(); got != "https://forgejo.astucia.aios/AstuciaAI/aios" {
+	if got := remote.WebURL(); got != "https://forgejo.internal.example/TeamOrg/service" {
 		t.Fatalf("WebURL = %q", got)
 	}
 }

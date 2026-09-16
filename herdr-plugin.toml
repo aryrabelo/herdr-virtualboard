@@ -1,5 +1,12 @@
 # herdr-plugin.toml — manifest for the herdr-virtualboard plugin.
 #
+#   VirtualBoard   https://virtualboard.dev
+#   Documentation  https://virtualboard.github.io/herdr-virtualboard/
+#   Source         https://github.com/virtualboard/herdr-virtualboard
+#
+# `herdr plugin install` previews this file before running anything, so the
+# links above are the first thing someone installing the plugin sees.
+#
 # herdr-virtualboard turns a VirtualBoard workspace into a kanban board inside
 # Herdr: columns are the VirtualBoard lifecycle (backlog → in-progress → review
 # → done, with in-progress ↔ blocked), cards are the markdown feature specs

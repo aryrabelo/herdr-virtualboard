@@ -13,7 +13,9 @@ VirtualBoard role agent in a visible pane.**
   <img src="docs/assets/board.png" alt="The hvb board: five columns — backlog, in progress, blocked, review, done — each card showing its feature number, title, priority, complexity, owner and acceptance-criteria progress." width="100%">
 </p>
 
-**📖 [Full documentation](https://virtualboard.github.io/herdr-virtualboard/)**
+**📖 [Documentation](https://virtualboard.github.io/herdr-virtualboard/)** ·
+**🗂 [VirtualBoard](https://virtualboard.dev)** ·
+**🐏 [Herdr](https://herdr.dev)**
 
 ## Why this exists
 
@@ -305,6 +307,15 @@ never starts an agent, and never makes a provider call.
 - [`docs/configuration.md`](docs/configuration.md) — configuration and environment
 - [`docs/testing.md`](docs/testing.md) — the gates and the e2e catalogue
 - [`AGENTS.md`](AGENTS.md) — the rules for agents working on this repository
+
+## The VirtualBoard family
+
+| | |
+|---|---|
+| [virtualboard.dev](https://virtualboard.dev) | the project — markdown-first feature specs for AI–human teams |
+| [`vb-cli`](https://virtualboard.github.io/vb-cli/) | the CLI this plugin drives every change through |
+| [`template-base`](https://virtualboard.github.io/template-base/) | the workspace template, including the agent charters hvb dispatches |
+| **`herdr-virtualboard`** | this plugin — the board and the agent dispatcher, inside [Herdr](https://herdr.dev) |
 
 ## Licence
 

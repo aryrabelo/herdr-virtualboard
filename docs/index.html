@@ -27,6 +27,7 @@
     <a href="#worktrees">Worktrees</a>
     <a href="#cli">CLI</a>
     <a href="#config">Config</a>
+    <a href="https://virtualboard.dev">VirtualBoard&nbsp;&#8599;</a>
     <a href="https://github.com/virtualboard/herdr-virtualboard">GitHub&nbsp;&#8599;</a>
   </nav>
 </header>
@@ -378,6 +379,21 @@ token   = <span class="s">""</span>                       <span class="c"># Forg
     <tr><td>A run shows <code>awaiting</code></td><td>The agent stopped without reporting — a closed pane, or a finished turn with no <code>hvb run done</code>. The feature is deliberately not moved.</td></tr>
     <tr><td>No pull request</td><td><code>hvb run show</code> gives the reason and a compare URL. The run still succeeded.</td></tr>
     <tr><td>Exit 6</td><td>Herdr is not running, or is not exactly 0.9.0 / protocol 22.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="family">The VirtualBoard family</h2>
+
+<p>This plugin is one piece of <a href="https://virtualboard.dev">VirtualBoard</a>:</p>
+
+<div class="table-wrap">
+<table>
+  <tbody>
+    <tr><td><a href="https://virtualboard.dev">virtualboard.dev</a></td><td>the project — markdown-first feature specs for AI&ndash;human teams</td></tr>
+    <tr><td><a href="https://virtualboard.github.io/vb-cli/"><code>vb-cli</code></a></td><td>the CLI this plugin drives every change through</td></tr>
+    <tr><td><a href="https://virtualboard.github.io/template-base/"><code>template-base</code></a></td><td>the workspace template, including the agent charters hvb dispatches</td></tr>
+    <tr><td><strong><code>herdr-virtualboard</code></strong></td><td>this plugin — the board and the agent dispatcher, inside <a href="https://herdr.dev">Herdr</a></td></tr>
   </tbody>
 </table>
 </div>

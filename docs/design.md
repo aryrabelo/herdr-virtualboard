@@ -89,7 +89,7 @@ feature, the label hint table, `qa` for anything in review, then the configured 
 
 The launch is **pane-first**, which is Herdr's documented contract rather than a choice:
 
-1. gate on Herdr 0.9.0 / protocol 22;
+1. gate on the compatibility floor (Herdr 0.9.0 / protocol 25 or newer);
 2. find or create the workspace rooted at the project;
 3. find or create the feature's `ftr-####` tab — one per feature, reused across runs, so three
    dispatches do not leave three tabs;
@@ -118,12 +118,18 @@ Through the `herdr` CLI, not the socket. The CLI is the contract Herdr documents
 callers, it already emits the JSON this code decodes, and hvb needs no event subscription — there is
 nothing a second protocol would buy.
 
-The version gate is policy, not negotiation: exactly 0.9.0 and protocol 22. A different protocol may
-have moved a field this code reads, and failing the dispatch beats launching an agent into a pane
-hvb can no longer track. The one exception, as in herdr-board, is cleanup: closing a pane hvb
-created stays ungated, so a Herdr upgrade cannot strand a run hvb is responsible for tidying up.
+The version gate is policy, not negotiation, but it is a floor rather than an exact pin: Herdr 0.9.0
+or newer and socket protocol 25 or newer. A lower protocol may have moved a field this code reads,
+and failing the dispatch beats launching an agent into a pane hvb can no longer track; a *higher*
+one is the ordinary case on a host that keeps releasing, and rejecting it only broke dispatch. Both
+floors move from the environment (`HVB_MIN_HERDR_VERSION`, `HVB_MIN_HERDR_PROTOCOL`). The one
+exception, as in herdr-board, is cleanup: closing a pane hvb created stays ungated, so a Herdr
+upgrade cannot strand a run hvb is responsible for tidying up.
 
-Every argv in `internal/herdrcli` was verified against a running Herdr 0.9.0 and is pinned by a test
+Versions are compared as semver, field by field, never as strings — `"0.48.0" < "0.9.0"` is true
+lexicographically and would reject every host release past 0.9.
+
+Every argv in `internal/herdrcli` was verified against a running bora 0.48.0 and is pinned by a test
 that asserts the exact command line. Do not change one from memory — see
 [`docs/herdr.md`](herdr.md).
 

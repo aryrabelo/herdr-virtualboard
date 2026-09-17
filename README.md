@@ -1,7 +1,7 @@
 # herdr-virtualboard
 
 ![Go](https://img.shields.io/badge/go-1.25-00ADD8.svg)
-![herdr 0.9.0](https://img.shields.io/badge/herdr-0.9.0%20%C2%B7%20protocol%2022-8a2be2)
+![herdr 0.9.0+ / protocol 25+](https://img.shields.io/badge/herdr-0.9.0%2B%20%C2%B7%20protocol%2025%2B-8a2be2)
 ![VirtualBoard](https://img.shields.io/badge/virtualboard-vb%20CLI-0aa)
 ![platforms: linux, macOS](https://img.shields.io/badge/platforms-linux%2C%20macOS-informational)
 
@@ -44,34 +44,37 @@ every change back through `vb`:
 ## Install
 
 ```bash
-herdr plugin install virtualboard/herdr-virtualboard
+bora plugin install virtualboard/herdr-virtualboard
 ```
 
 Open the board:
 
 ```bash
-herdr plugin action invoke open-virtualboard --plugin herdr-virtualboard
+bora plugin action invoke open-virtualboard --plugin herdr-virtualboard
 ```
 
-Requirements: **Herdr 0.9.0** (socket protocol 22), the [`vb`
+Requirements: **Herdr 0.9.0 or newer, socket protocol 25 or newer** — a floor, not an exact pin; see
+[`docs/herdr.md`](docs/herdr.md) for the two variables that move it. Plus the [`vb`
 CLI](https://github.com/virtualboard/vb-cli), a Go toolchain for the install-time build, and a
 VirtualBoard workspace (`vb init`). Linux and macOS.
 
 <details>
 <summary><strong>A keybinding to open the board from anywhere</strong></summary>
 
-Not configured automatically. Add it to `~/.config/herdr/config.toml`:
+Not configured automatically. Add it to the host's `config.toml` (`~/.config/bora/config.toml` on
+this fork, `~/.config/herdr/config.toml` upstream; `scripts/install.sh --keybinding` finds it for
+you):
 
 ```toml
 [[keys.command]]
 key = "prefix+shift+v"
 type = "shell"
-command = "herdr plugin action invoke open-virtualboard --plugin herdr-virtualboard"
+command = "bora plugin action invoke open-virtualboard --plugin herdr-virtualboard"
 description = "open the VirtualBoard kanban (overlay)"
 ```
 
-With Herdr's default `ctrl+b` prefix that is **Ctrl+B Shift+V**. Do not use `prefix+v` — lowercase
-single letters are where Herdr keeps its own bindings. Then `herdr server reload-config`.
+With the host's default `ctrl+b` prefix that is **Ctrl+B Shift+V**. Do not use `prefix+v` —
+lowercase single letters are where it keeps its own bindings. Then `bora server reload-config`.
 
 </details>
 
@@ -81,8 +84,8 @@ single letters are where Herdr keeps its own bindings. Then `herdr server reload
 Install the Herdr integration for whichever harness you dispatch:
 
 ```bash
-herdr integration install claude    # or pi, codex, opencode, antigravity-cli, …
-herdr integration status
+bora integration install claude    # or pi, codex, opencode, antigravity-cli, …
+bora integration status
 ```
 
 With it, Herdr reports precise `working` / `blocked` / `done` per pane and hvb can tell a finished

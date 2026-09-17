@@ -103,7 +103,9 @@ auto = true
 | `HVB_PROJECT_ROOT` | project root, as if `--root` had been passed |
 | `HVB_OWNER` | the handle hvb claims features under |
 | `HVB_VB_BIN` | the `vb` executable to use |
-| `HERDR_BIN_PATH` | the `herdr` executable to use; Herdr injects this into panes it manages |
+| `HERDR_BIN_PATH` | the host executable to use (default `bora`); the host injects this into panes it manages |
+| `HVB_MIN_HERDR_VERSION` | lower or raise the host version floor (default `0.9.0`) |
+| `HVB_MIN_HERDR_PROTOCOL` | lower or raise the socket protocol floor (default `25`; use `22` for upstream Herdr 0.9.0) |
 | `HVB_CLI_INSTALL_DIR` | where `scripts/install-cli.sh` puts `hvb` (default `~/.local/bin`) |
 | `NO_COLOR` | draw the board without colour |
 

@@ -86,8 +86,8 @@ directory and clean up after yourself:
 vb init
 hvb doctor                    # prove the gate passes
 hvb run start FTR-0001 --harness claude
-herdr tab list --workspace <ws>
-herdr workspace close <ws>    # close what you created, and only that
+bora tab list --workspace <ws>
+bora workspace close <ws>    # close what you created, and only that
 ```
 
 When you learn something from a live server, pin it in `internal/herdrcli/client_test.go` and record

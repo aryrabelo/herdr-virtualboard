@@ -16,9 +16,9 @@ makes hvb hold an opinion about a feature that `vb` does not share is wrong, how
 2. **Never invent a transition.** `backlog → in-progress → review → done`, with `in-progress ↔
    blocked`. Nothing leaves `done`. The table in `internal/feature/status.go` is a duplicate kept so
    the TUI can grey out impossible moves; vb remains the authority.
-3. **Never take a Herdr command or JSON shape from memory.** Read it live from the installed binary
-   (`herdr <group>`, `herdr api schema --json`), then pin the exact argv in a test. See
-   [`docs/herdr.md`](docs/herdr.md).
+3. **Never take a host command or JSON shape from memory.** Read it live from the installed binary
+   (`bora <group> --help`, `bora <group> <verb> --help`, `bora api schema --json`), then pin the
+   exact argv in a test. See [`docs/herdr.md`](docs/herdr.md).
 4. **Never let a test touch a real Herdr session.** `HERDR_BIN_PATH` beats `PATH`, so a stub on
    `PATH` is not enough — set `HERDR_BIN_PATH` and `HVB_VB_BIN`. See [`docs/testing.md`](docs/testing.md).
 5. **Never widen what hvb stores.** The run store holds which pane is running which feature and

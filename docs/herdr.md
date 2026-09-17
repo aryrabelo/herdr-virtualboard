@@ -10,53 +10,69 @@ to verify it again** — because the installed binary is the authority and this 
 
 | Command | What it gives you |
 |---|---|
-| `herdr <group>` (bare, e.g. `herdr pane`) | usage for every verb in that group, with its flags. This is the one that matters — `herdr pane split --help` prints the *top-level* help, not the subcommand's. |
-| `herdr api schema --json` | the full socket API: every method, its parameters, every event, and the top-level `protocol` number |
-| `herdr api snapshot` | live runtime state — what is actually open right now |
-| `herdr status` | client and server versions, the protocol, the socket path |
-| `herdr --skill` | Herdr's own agent-driving contract |
+| `bora <group> --help` (e.g. `bora pane --help`) | every verb in that group |
+| `bora <group> <verb> --help` (e.g. `bora pane split --help`) | that verb's own arguments and flags, including enum values. Upstream Herdr 0.9.0 printed the *top-level* help here instead; on bora 0.48.0 it prints the subcommand's, verified 2026-09-17. |
+| `bora api schema --json` | the full socket API: every method, its parameters, every event, and the top-level `protocol` number |
+| `bora api snapshot` | live runtime state — what is actually open right now |
+| `bora status` | client and server versions, the protocol, the socket path |
+| `bora --skill` | the host's own agent-driving contract |
 
 ```bash
-test "$(herdr --version)" = "herdr 0.9.0"
-herdr api schema --json | python3 -c 'import json,sys; assert json.load(sys.stdin)["protocol"]==22'
+bora status              # server version and socket protocol, the two the gate reads
+bora api schema --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["protocol"])'
 ```
 
 ## The compatibility gate
 
-hvb supports **exactly Herdr 0.9.0, socket protocol 22**. `herdrcli.Gate` checks it before any
-operation that creates layout or launches an agent. It is policy, not protocol negotiation.
+hvb requires **Herdr 0.9.0 or newer AND socket protocol 25 or newer**. It is a floor, not an exact
+pin: the host ships releases far faster than this plugin, and an exact pin fails on every release
+that moved nothing hvb reads. `herdrcli.Gate` checks the floor before any operation that creates
+layout or launches an agent. It is still policy, not protocol negotiation.
+
+The floor is compared as real semver, field by field. Never compare these versions as strings:
+`"0.48.0" < "0.9.0"` is true lexicographically, because `4` sorts before `9`, so a string floor
+rejects every host release past 0.9. `internal/herdrcli/client_test.go` pins that case.
+
+Two environment variables move the floor without recompiling:
+
+| Variable | Effect |
+|---|---|
+| `HVB_MIN_HERDR_VERSION` | version floor, e.g. `0.9.0` |
+| `HVB_MIN_HERDR_PROTOCOL` | protocol floor; use `22` to run against upstream Herdr 0.9.0 |
+
+A malformed value is an error rather than a silent fallback to the compiled floor.
 
 The deliberate exception is cleanup and liveness for panes hvb already owns: `ClosePane` and pane
 reads stay ungated, so a Herdr upgrade cannot leave hvb unable to tidy up a run it started.
 
 ## Verified argv
 
-Every line below was run against Herdr 0.9.0 and is pinned by a test in
+Every line below was run against bora 0.48.0 (and Herdr 0.9.0 before it) and is pinned by a test in
 `internal/herdrcli/client_test.go`. The tests assert the exact string, so an edit made from memory
 fails there rather than at dispatch time.
 
 ```text
-herdr status
-herdr workspace list
-herdr workspace create --cwd PATH --label TEXT [--env K=V]... --no-focus
-herdr tab list --workspace WS
-herdr tab create --workspace WS --cwd PATH --label TEXT [--env K=V]... --no-focus
-herdr tab rename TAB LABEL
-herdr tab close TAB
-herdr pane list [--workspace WS]
-herdr pane get PANE
-herdr pane split PANE --direction right --cwd PATH [--env K=V]... --no-focus
-herdr pane rename PANE LABEL
-herdr pane close PANE
-herdr pane read PANE --source recent-unwrapped --lines N
-herdr agent list
-herdr agent get TARGET
-herdr agent start NAME --kind KIND --pane PANE --timeout MS
-herdr agent prompt TARGET TEXT [--wait] [--timeout MS]
-herdr agent focus TARGET
-herdr notification show TEXT
-herdr plugin pane open --plugin ID --entrypoint ID --placement overlay --focus
-herdr plugin pane focus PANE
+bora status
+bora workspace list
+bora workspace create --cwd PATH --label TEXT [--env K=V]... --no-focus
+bora tab list --workspace WS
+bora tab create --workspace WS --cwd PATH --label TEXT [--env K=V]... --no-focus
+bora tab rename TAB LABEL
+bora tab close TAB
+bora pane list [--workspace WS]
+bora pane get PANE
+bora pane split PANE --direction right --cwd PATH [--env K=V]... --no-focus
+bora pane rename PANE LABEL
+bora pane close PANE
+bora pane read PANE --source recent-unwrapped --lines N
+bora agent list
+bora agent get TARGET
+bora agent start NAME --kind KIND --pane PANE --timeout MS
+bora agent prompt TARGET TEXT [--wait] [--timeout MS]
+bora agent focus TARGET
+bora notification show TEXT
+bora plugin pane open --plugin ID --entrypoint ID --placement overlay --focus
+bora plugin pane focus PANE
 ```
 
 `--env` arguments are emitted in sorted order so the argv is reproducible.

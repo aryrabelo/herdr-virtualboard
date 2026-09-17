@@ -18,8 +18,10 @@
 # writes to Herdr's own state.
 #
 # Field reference verified against `herdr plugin` on Herdr 0.9.0. The manifest
-# enforces the install-time floor; the runtime gate in internal/herdrcli
-# additionally requires exactly 0.9.0 and socket protocol 22.
+# enforces the install-time floor, which the host compares as real semver
+# (bora: src/app/api/plugins/manifest.rs:239 against build_info::BASE_VERSION),
+# so 0.9.0 admits bora 0.48.0. The runtime gate in internal/herdrcli carries
+# its own floor: herdr 0.9.0 or newer AND socket protocol 25 or newer.
 id = "herdr-virtualboard"
 name = "VirtualBoard"
 version = "0.1.0"
@@ -47,7 +49,8 @@ placement = "overlay"
 command = ["./bin/hvb", "tui"]
 
 # Summon the board. Bind it to a key with a [[keys.command]] in
-# ~/.config/herdr/config.toml (see the README). The launcher is idempotent:
+# the host's config.toml (see the README, and `scripts/install.sh --keybinding`,
+# which asks the running server where that file is). The launcher is idempotent:
 # open, then focus, then toggle off on a repeat press.
 [[actions]]
 id = "open-virtualboard"

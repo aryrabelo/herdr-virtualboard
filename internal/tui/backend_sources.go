@@ -48,6 +48,7 @@ const (
 	LabelSourceFios  = LabelPrefix + "source:fios"
 	LabelSourceGates = LabelPrefix + "source:gates"
 	LabelSourcePR    = LabelPrefix + "source:pr"
+	LabelSourceIssue = LabelPrefix + "source:issue"
 	LabelCanceled    = LabelPrefix + "state:canceled"
 	LabelExternal    = LabelPrefix + "external"
 	LabelDraft       = LabelPrefix + "draft"
@@ -289,6 +290,8 @@ func sourceKind(spec *feature.Spec) string {
 		return "FIOS.md"
 	case spec.HasLabel(LabelSourceGates):
 		return "gates/"
+	case spec.HasLabel(LabelSourceIssue):
+		return "GitHub issues"
 	default:
 		return ""
 	}
@@ -322,6 +325,16 @@ func describeOrigin(spec *feature.Spec) string {
 			return fmt.Sprintf("%s is a pull request; act on it on GitHub (gh pr view %s)", spec.ID, number)
 		}
 		return fmt.Sprintf("%s is a pull request; act on it on GitHub", spec.ID)
+	case spec.HasLabel(LabelSourceIssue):
+		// An issue's column is decided by usina and kit.py, not by this
+		// board, so the refusal names both places rather than only the
+		// issue: moving the card here would be a lie either way.
+		if number := labelValue(spec, labelIssuePrefix); number != "" {
+			return fmt.Sprintf(
+				"%s is a GitHub issue; act on it on GitHub (gh issue view %s) and let usina rank it",
+				spec.ID, number)
+		}
+		return fmt.Sprintf("%s is a GitHub issue; act on it on GitHub and let usina rank it", spec.ID)
 	case spec.HasLabel(LabelSourceFios):
 		if file == "" {
 			file = "FIOS.md"

@@ -22,6 +22,7 @@ import (
 
 	"github.com/virtualboard/herdr-virtualboard/internal/fios"
 	"github.com/virtualboard/herdr-virtualboard/internal/ghboard"
+	"github.com/virtualboard/herdr-virtualboard/internal/issuesrc"
 )
 
 // The board spells the source labels itself so that composing a board does not
@@ -41,6 +42,12 @@ func TestLabelSpellingsMatchTheSources(t *testing.T) {
 		{"state:canceled", LabelCanceled, ghboard.LabelCanceled},
 		{"external", LabelExternal, ghboard.LabelExternal},
 		{"draft", LabelDraft, ghboard.LabelDraft},
+		{"the reserved prefix", LabelPrefix, issuesrc.LabelPrefix},
+		{"source:issue", LabelSourceIssue, issuesrc.LabelSourceIssue},
+		// The issue source and the pull-request source must agree on the
+		// issue key, or a pull request and the issue it lands would be two
+		// unrelated cards.
+		{"issue:", labelIssuePrefix, issuesrc.LabelIssuePrefix},
 	}
 	for _, testCase := range cases {
 		if testCase.board != testCase.owner {
@@ -53,8 +60,9 @@ func TestLabelSpellingsMatchTheSources(t *testing.T) {
 	// namespace. An unprefixed one is a name a repository can own, and the
 	// board would be reading the repository's opinion as the harness's verdict.
 	for _, label := range []string{LabelSourceFios, LabelSourceGates, LabelSourcePR,
-		LabelCanceled, LabelExternal, LabelDraft,
-		labelIssuePrefix, labelPRPrefix, labelGatePrefix} {
+		LabelSourceIssue, LabelCanceled, LabelExternal, LabelDraft,
+		labelIssuePrefix, labelPRPrefix, labelGatePrefix,
+		issuesrc.LabelOriginUsina, issuesrc.LabelOriginGH, issuesrc.LabelRankPrefix} {
 		if !strings.HasPrefix(label, LabelPrefix) {
 			t.Errorf("%q is outside the reserved namespace, so repository content can forge it", label)
 		}

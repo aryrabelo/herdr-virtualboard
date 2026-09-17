@@ -65,10 +65,24 @@ A string floor therefore rejects every host release past 0.9. `parseVersion` spl
 (`0.48.0` vs `0.9.0`, `0.10.0` vs `0.9.0`) and in the patch field (`0.48.12` vs `0.48.9`), so the test
 cannot pass today and lie at the next release. The protocol stays an `int` end to end.
 
-**Operator escape hatch.** `HVB_MIN_HERDR_VERSION` and `HVB_MIN_HERDR_PROTOCOL` move either floor
-without recompiling. A malformed value is an error, not a silent fallback — an operator who exported
-the variable is entitled to know it did not take. Running against upstream Herdr 0.9.0 (protocol 22)
-therefore only needs `HVB_MIN_HERDR_PROTOCOL=22`.
+**Consequence: this plugin is now fork-only by construction.** A protocol floor of 25 means the
+plugin **rejects upstream Herdr 0.9.0**, which speaks protocol 22. Anyone running this checkout
+against the original herdr gets `ErrIncompatible` — `need socket protocol 25 or newer, found 22` —
+and will reasonably conclude the fix is broken. It is not: the floor was raised to the protocol whose
+CLI surface was actually verified, and 22 was never re-verified against this code.
+
+That is the right trade for this machine, and it is reversible without recompiling.
+
+**Operator escape hatch.** `HVB_MIN_HERDR_VERSION` and `HVB_MIN_HERDR_PROTOCOL` move either floor.
+A malformed value is an error, not a silent fallback — an operator who exported the variable is
+entitled to know it did not take. So running against upstream Herdr 0.9.0 is one variable:
+
+```bash
+HVB_MIN_HERDR_PROTOCOL=22 hvb doctor
+```
+
+If this fork is ever offered back upstream, that default is the one line to negotiate: upstream would
+want 22, and everything else here is host-name cosmetics plus the two security fixes.
 
 **Reapply after an upstream rewrite:** find the two equality comparisons in `Client.Gate`, replace
 with `found.less(required)` and `status.ClientProtocol < floor.Protocol`, and keep `ResolvedFloor`
@@ -157,8 +171,54 @@ renamed:
 | `herdr` as the `hvb doctor` check label | user-facing name for the host; changing it would churn `e2e/07-doctor.sh` for nothing |
 | `~/.config/herdr-virtualboard/`, `~/.local/share/herdr-virtualboard/`, `.herdr-virtualboard-managed` | the plugin's *own* config, data and marker paths, named after the plugin id, not after the host |
 | `min_herdr_version = "0.9.0"` | measured: the host's install gate compares it as semver, so it already passes — see §6 |
-| every argv in `internal/herdrcli` | verified verb by verb and flag by flag against `bora <group> <verb> --help` on 0.48.0; **zero argv changes were needed**, including `--kind`'s 23 harnesses, which match `bora agent start --help` exactly |
+| every argv in `internal/herdrcli` | **zero changes needed** — see "The argv audit" below, which is the measurement that decides whether this plugin survives the next upstream sync |
 | repository, org, and site URLs | this fork tracks upstream; it does not replace it |
+
+## The argv audit — measured 2026-09-17, zero changes needed
+
+This is the single most reusable result here, so it gets its own section: **the fork's CLI surface has
+not diverged from upstream's.** Every one of the 26 command lines this plugin builds still exists on
+bora 0.48.0, verb for verb, flag for flag, positional for positional, enum value for enum value.
+Nothing in `internal/herdrcli` had to change to talk to the fork.
+
+That is why this plugin is cheap to keep in sync: the adaptation is a version gate, a binary name and
+two security fixes, not a re-targeting of the API.
+
+How it was measured, and how to repeat it — only `--help`, so it creates no workspace, pane or
+worktree:
+
+```bash
+# the two help levels, per group and per verb
+for g in workspace tab pane agent worktree notification plugin; do bora "$g" --help; done
+for c in "workspace create" "workspace get" "tab list" "tab create" "tab rename" "tab close" \
+         "pane list" "pane get" "pane split" "pane rename" "pane close" "pane read" \
+         "agent list" "agent get" "agent start" "agent prompt" "agent wait" "agent focus" \
+         "agent send-keys" "notification show" "worktree list" "worktree create" \
+         "worktree open" "worktree remove" "plugin pane open" "plugin pane focus"; do
+  echo "=== bora $c ==="; bora $c --help
+done
+
+# and the argv this code actually builds, to diff against the above
+grep -rn 'c\.call(\|c\.raw(\|c\.rawNoTimeout(' internal/herdrcli/
+```
+
+Findings worth keeping:
+
+- `agent start --kind` accepts exactly the 23 harnesses in `herdrcli.Kinds`, in the same order:
+  `pi, claude, codex, gemini, cursor, devin, agy, cline, omp, mastracode, opencode, copilot, kimi,
+  kiro, droid, amp, grok, hermes, kilo, qodercli, qwen, maki, muse`.
+- Only *additive* differences: `pane split` gained `--pane/--current/--ratio/--right-click`,
+  `worktree *` gained `--workspace`, `plugin pane open` gained `--workspace/--target-pane/--direction/--cwd/--env`,
+  `notification show` gained `--body/--position/--sound`. All optional, none required, none renamed.
+- `plugin` does **not** appear in `bora --help`'s group list, but `bora plugin --help` works and has
+  all 11 subcommands. Do not conclude from the root help that the group is gone.
+- `bora status` still prints the YAML-ish blocks `Status` parses line-wise, with the same
+  `client.protocol` / `server.version` / `server.status` / `server.socket` keys.
+- `pane read` still prints terminal content rather than a JSON envelope — the one command in this
+  package that does.
+
+If a future sync makes this section stale, re-run the two loops above rather than trusting it. The
+installed binary is the authority; this is a cache with a date on it.
 
 ## Re-verifying the whole adaptation
 

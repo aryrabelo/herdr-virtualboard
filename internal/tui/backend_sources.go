@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/virtualboard/herdr-virtualboard/internal/config"
+	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 	"github.com/virtualboard/herdr-virtualboard/internal/roles"
 	"github.com/virtualboard/herdr-virtualboard/internal/runs"
@@ -117,6 +118,13 @@ type SourceBackend struct {
 	owner   string
 	project string
 
+	// dispatcher launches an agent on a card, or is nil on a board that
+	// only reads. Both shapes are real: `hvb queue` without --charters and
+	// --work-root has no repository to work in and no charters to pick a
+	// role from, and it must keep behaving exactly as it did — refusing
+	// with the source's own next step rather than half-dispatching.
+	dispatcher *dispatch.Dispatcher
+
 	// origins remembers, per card, the sentence that says where it lives, so
 	// a refusal can name the file without going back to the sources. kinds is
 	// the same thing for the board as a whole, for messages that cannot name
@@ -144,6 +152,53 @@ func NewSourceBackend(project string, cfg *config.Config, owner string, sources 
 		sources: sources, config: cfg, owner: owner, project: project,
 		origins: map[string]string{},
 	}
+}
+
+// NewSourceBackendWithDispatch is NewSourceBackend plus the ability to launch
+// an agent on a card. The dispatcher is injected fully built — internal/cli
+// already assembles one (app.go:140-150) and is the only place that knows how
+// to reach Herdr, vb and the run store — so this package gains no dependency
+// it did not already have, and the board keeps working without any of them.
+//
+// The dispatcher's configuration is replaced by a copy with the vb lock off;
+// withoutVBLock says why that is not optional.
+func NewSourceBackendWithDispatch(project string, cfg *config.Config, owner string, dispatcher *dispatch.Dispatcher, sources ...Source) *SourceBackend {
+	backend := NewSourceBackend(project, cfg, owner, sources...)
+	if dispatcher == nil {
+		return backend
+	}
+	// The Dispatcher is copied too: overwriting the caller's Config field
+	// would hand back a value changed behind its back, and the caller may
+	// well be building a second dispatcher from the same config.
+	dispatching := *dispatcher
+	source := dispatcher.Config
+	if source == nil {
+		source = backend.config
+	}
+	dispatching.Config = withoutVBLock(source)
+	backend.dispatcher = &dispatching
+	return backend
+}
+
+// withoutVBLock is cfg with the vb lock disabled, as a copy.
+//
+// A card on this board is a pull request, a GitHub issue, a FIOS.md thread or
+// a gate box, and vb has never heard of any of those ids. claim calls
+// vb.Acquire on the id and only skips it when the TTL is non-positive
+// (dispatch.go:363-366), while the default is 60 minutes (config.go:209) — so
+// with the shared setting every dispatch from here would die on a lock for a
+// feature that does not exist.
+//
+// It has to be a copy, and that is the easy part to get wrong. The same
+// *config.Config is what the board itself reads for its columns and its
+// harness, and what `hvb tui` hands the vb backend in the same process;
+// zeroing the field in place would silently turn locking off for every feature
+// that pointer reaches. Only the one scalar is overridden, so the nested
+// Columns map stays shared — dispatch only reads it.
+func withoutVBLock(cfg *config.Config) *config.Config {
+	unlocked := *cfg
+	unlocked.LockTTLMinutes = 0
+	return &unlocked
 }
 
 // Load reads every source. A source that fails contributes its errors and
@@ -176,8 +231,28 @@ func (b *SourceBackend) Load(ctx context.Context) ([]*feature.Spec, []*runs.Run,
 	b.origins, b.kinds = origins, kinds
 	b.mu.Unlock()
 
-	// No run store: nothing on this board was dispatched from it.
-	return specs, nil, problems
+	// Runs come from the dispatcher's own store. A read-only board records
+	// none, and a dispatching one reads back exactly what it launched: the
+	// store file is keyed per board (see queueProjectID in internal/cli), so
+	// nothing else writes to it.
+	if b.dispatcher == nil {
+		return specs, nil, problems
+	}
+	// Reconciling before reading is what keeps the board honest without a
+	// daemon, as on the vb board: a run whose pane the user closed settles
+	// here instead of showing as live forever. Its timeout route ends in
+	// Complete, whose vb transition cannot land for these ids — FindSpec
+	// looks under <work-root>/.virtualboard, which a plain repository does
+	// not have — but Complete records that as the run's TransitionError and
+	// still ends the run, so the run settles and the board says why.
+	if _, err := b.dispatcher.Reconcile(ctx); err != nil {
+		problems = append(problems, err)
+	}
+	dispatched, err := b.dispatcher.Store.List()
+	if err != nil {
+		problems = append(problems, err)
+	}
+	return specs, dispatched, problems
 }
 
 func (b *SourceBackend) Move(_ context.Context, id string, target feature.Status, _ string) error {
@@ -193,36 +268,67 @@ func (b *SourceBackend) SetField(_ context.Context, id, key, value string) error
 	return b.refuse(fmt.Sprintf("set %s=%q on %s", key, value, id), id)
 }
 
-// Dispatch refuses, and says why.
+// Dispatch launches an agent on a card when this board was given a repository
+// to work in and charters to pick a role from, and refuses otherwise.
 //
-// Dispatching is not merely unwired here — it cannot work for these cards as
-// the dispatcher stands. internal/dispatch/dispatch.go:115 claims the feature
-// before anything else, and claim (dispatch.go:363-377) calls vb.Acquire on the
-// feature id with a lock TTL that defaults to 60 minutes
-// (internal/config/config.go:175); vb has never heard of FIO-3 or PR-179, so
-// the dispatch aborts before a pane exists. Past the claim, launch reads
-// d.Workspace.Rel(spec.Path) (dispatch.go:242) and completion settles a run
-// with vb move (internal/dispatch/complete.go:147-171) — both of which need a
-// VirtualBoard workspace that owns the id.
-//
-// Refusing with the source's own next step is more useful than a run that dies
-// on a lock error, so that is what the board does.
-func (b *SourceBackend) Dispatch(_ context.Context, spec *feature.Spec, role, _ string, _ bool) (*runs.Run, error) {
-	return nil, b.refuseDispatch(spec, role)
+// The refusal is not mere absence of wiring: without --work-root there is no
+// directory to run in, and dispatch would claim the feature through vb, which
+// does not know these ids. Naming the source's own next step is more useful
+// than a run that dies on a lock error, so that is what the board does.
+func (b *SourceBackend) Dispatch(ctx context.Context, spec *feature.Spec, role, kind string, force bool) (*runs.Run, error) {
+	if b.dispatcher == nil {
+		return nil, b.refuseDispatch(spec, role)
+	}
+	return b.dispatcher.Start(ctx, dispatch.Request{Spec: spec, Role: role, Kind: kind, Force: force})
 }
 
-func (b *SourceBackend) DispatchWith(_ context.Context, spec *feature.Spec, role, _ string, _, _ *bool) (*runs.Run, error) {
-	return nil, b.refuseDispatch(spec, role)
+func (b *SourceBackend) DispatchWith(ctx context.Context, spec *feature.Spec, role, kind string, worktree, pr *bool) (*runs.Run, error) {
+	if b.dispatcher == nil {
+		return nil, b.refuseDispatch(spec, role)
+	}
+	return b.dispatcher.Start(ctx, dispatch.Request{
+		Spec: spec, Role: role, Kind: kind, Worktree: worktree, PR: pr,
+	})
 }
 
-func (b *SourceBackend) Cancel(_ context.Context, runID string) error { return b.noRuns(runID) }
+// Cancel and Focus follow the runs, not the cards: a run this board dispatched
+// is a pane this board created, so it is allowed to close it or bring it into
+// view. Neither touches the card's source, which is why they are not refusals.
+func (b *SourceBackend) Cancel(ctx context.Context, runID string) error {
+	if b.dispatcher == nil {
+		return b.noRuns(runID)
+	}
+	_, err := b.dispatcher.Cancel(ctx, runID, "cancelled from the board")
+	return err
+}
 
-func (b *SourceBackend) Focus(_ context.Context, runID string) error { return b.noRuns(runID) }
+func (b *SourceBackend) Focus(ctx context.Context, runID string) error {
+	if b.dispatcher == nil {
+		return b.noRuns(runID)
+	}
+	return b.dispatcher.Focus(ctx, runID)
+}
 
-// Roles is empty: role charters live in a VirtualBoard workspace, and this
-// board does not have one. The dispatch picker degrades to "no roles", which is
-// the truth, and openMovePicker/openDispatchPicker tolerate it.
-func (b *SourceBackend) Roles() []roles.Role { return nil }
+// Roles is the charters a dispatch can choose from: the ones the dispatcher was
+// loaded with, and none at all on a board that cannot dispatch. openMovePicker
+// tolerates empty; openDispatchPicker asks DispatchUnavailable instead of
+// assuming missing charters.
+func (b *SourceBackend) Roles() []roles.Role {
+	if b.dispatcher == nil {
+		return nil
+	}
+	return b.dispatcher.Roles
+}
+
+// DispatchUnavailable is why pressing d does nothing on a read-only board, in
+// the board's own words: the card is a pull request, an issue, a FIOS.md thread
+// or a gate box, and it names where to act instead. Without this the picker
+// blamed absent charters in .virtualboard/agents — a directory this board never
+// reads, and creating it would not have made dispatch work either. It is only
+// ever asked when Roles() is empty, which is exactly the no-dispatcher case.
+func (b *SourceBackend) DispatchUnavailable(spec *feature.Spec) error {
+	return b.refuseDispatch(spec, "")
+}
 
 func (b *SourceBackend) Config() *config.Config { return b.config }
 
@@ -235,6 +341,10 @@ func (b *SourceBackend) refuse(action, id string) error {
 	return fmt.Errorf("the board cannot %s: %s (%w)", action, b.origin(id), ErrReadOnly)
 }
 
+// refuseDispatch is the refusal for a board opened without a dispatch half. It
+// names the flags that turn dispatch on as well as the place the card lives:
+// the user pressed a key that can work here, and the reason it did not is a
+// missing pair of flags, not the card.
 func (b *SourceBackend) refuseDispatch(spec *feature.Spec, role string) error {
 	id := ""
 	if spec != nil {
@@ -243,7 +353,7 @@ func (b *SourceBackend) refuseDispatch(spec *feature.Spec, role string) error {
 	if role == "" {
 		role = "an agent"
 	}
-	return fmt.Errorf("the board cannot dispatch %s onto %s: dispatch claims the feature through vb, which does not know this id; %s (%w)",
+	return fmt.Errorf("the board cannot dispatch %s onto %s: it was opened without --charters and --work-root, so it has no role to pick and no repository to work in; %s (%w)",
 		role, id, b.origin(id), ErrReadOnly)
 }
 
@@ -365,33 +475,27 @@ func labelValue(spec *feature.Spec, prefix string) string {
 	return ""
 }
 
-// sourceMeta is the extra card facts the read-only sources carry: the linked
-// issue, whether the item is still a draft, whether its author is outside the
-// repository, and how old it is. Everything comes off the labels and the
-// frontmatter the contract fills, so renderCard stays one concern and no source
-// has to know how a card is drawn.
+// sourceMeta is the chips a source-backed card carries besides its labels:
+// whether the item is still a draft and whether its author is outside the
+// repository. The linked issue and the age live in the card HEADER now
+// (renderCard), where the reader looks for who and what before reading the
+// title. The old version minted "Issue #N" here from the issue prefix
+// regardless of kind, so an issue card announced its own number as a link to
+// itself — cardLinkedIssuesLabel owns that distinction.
 //
-// A card with no source: label gets nothing. A VirtualBoard spec also carries
-// created/updated dates, so without this gate every card on the spec-markdown
-// board grew an age it never used to show.
+// A card with no source: label gets nothing.
 func (m *Model) sourceMeta(card *Card) []string {
 	spec := card.Spec
 	if sourceKind(spec) == "" {
 		return nil
 	}
 	var out []string
-	if issue := labelValue(spec, labelIssuePrefix); issue != "" {
-		out = append(out, paint(m.palette.Accent, "Issue #"+issue))
-	}
 	if spec.HasLabel(LabelDraft) {
 		// A draft is in review but nobody is asking for one yet.
 		out = append(out, paint(m.palette.Dim, "Draft"))
 	}
 	if spec.HasLabel(LabelExternal) {
 		out = append(out, paint(m.palette.Warn, "External"))
-	}
-	if age, ok := specAge(spec, time.Now()); ok {
-		out = append(out, paint(m.palette.Dim, shortDuration(age)))
 	}
 	return out
 }

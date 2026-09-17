@@ -214,9 +214,15 @@ script can parse stdout unconditionally.
 
 `hvb queue` opens the same board over the queue that already exists instead of over spec markdown:
 `--vault DIR` reads `FIOS.md` and the gate ledgers under `gates/`, `--repo owner/name` reads the
-week's pull requests through the `gh` CLI, each card carrying the issue it closes. Both sources are
-read-only — moving, editing or dispatching a card is refused with the file that owns it — and a
-pull request that closed without merging gets its own terminal column.
+week's pull requests through the `gh` CLI, each card carrying the issue it closes. The sources stay
+read-only — moving, editing or creating a card is refused with the file that owns it — and a pull
+request that closed without merging gets its own terminal column.
+
+Dispatching is opt-in as a pair: `--charters DIR` with the role charters an agent can adopt and
+`--work-root DIR` with the repository it works in. With both, `d` picks a role and launches an agent
+through Herdr exactly as on the VirtualBoard board; with `--vault`, the charters default to
+`<vault>/.virtualboard/agents` when that directory exists. With neither, `d` names the flags that
+would enable it.
 
 An empty board says which kind of empty it is, because the columns cannot: a source that failed is
 reported as a failure, a queue with nothing open says so, and `hvb tui` on a workspace holding no

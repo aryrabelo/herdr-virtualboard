@@ -103,7 +103,7 @@ func TestMutationsAreRefusedNamingTheOwningFile(t *testing.T) {
 		{"dispatch onto a pull request", func() error {
 			_, err := backend.Dispatch(ctx, prCard("179", "board", feature.Review), "qa", "claude", false)
 			return err
-		}, []string{"PR-179", "vb"}},
+		}, []string{"PR-179", "--work-root"}},
 		{"create a card", func() error {
 			_, err := backend.Create(ctx, "algo novo", nil, "P1")
 			return err
@@ -175,7 +175,12 @@ func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 	if !strings.Contains(body, "CANCELED 1") {
 		t.Errorf("the board draws no cancelled column\n%s", body)
 	}
-	if !strings.Contains(body, "board: abandonado") {
+	// By id and kind, not by title: a title is incidental to the column
+	// width — 26 columns at 160/6 truncates one somewhere regardless — while
+	// the id is what names the card and the kind marker is what says what it
+	// is. Both have to reach the screen, and neither appears in the header,
+	// which carries only "CANCELED 1".
+	if !strings.Contains(body, "#179 (PR)") {
 		t.Errorf("the cancelled card itself is not drawn\n%s", body)
 	}
 }
@@ -353,18 +358,24 @@ func TestVirtualBoardCardsGainNothing(t *testing.T) {
 	vbSpec := spec("FTR-0001", "Primeiro spec do vb", feature.Backlog)
 	vbSpec.Complexity = "M"
 	vbSpec.Owner = "ary"
+	vbSpec.Updated = time.Now().Add(-90 * time.Minute).UTC().Format(time.RFC3339)
 
 	model := newTestModel(t, newFakeBackend(vbSpec), 160, 30)
 	card := model.Cards(feature.Backlog)[0]
+	header := model.renderCard(card, 60, false)[0]
+	if strings.Contains(header, "1h") {
+		t.Errorf("a vb card grew an age: %q", header)
+	}
 	if extra := model.sourceMeta(card); len(extra) != 0 {
 		t.Errorf("a vb card grew %v", extra)
 	}
 
-	// The same card, once a source claims it, does show its age.
+	// The same card, once a source claims it, does show its age — in the
+	// header, next to the owner, where the Factory card puts it.
 	vbSpec.Labels = []string{LabelSourceFios}
-	vbSpec.Updated = time.Now().Add(-90 * time.Minute).UTC().Format(time.RFC3339)
-	if extra := model.sourceMeta(card); len(extra) != 1 || !strings.Contains(extra[0], "1h") {
-		t.Errorf("a source card shows %v, want its age", extra)
+	header = model.renderCard(card, 60, false)[0]
+	if !strings.Contains(header, "@ary · 1h") {
+		t.Errorf("a source card header is %q, want the owner and its age", header)
 	}
 }
 

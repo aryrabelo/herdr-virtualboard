@@ -62,8 +62,11 @@ Three rules hold there:
 
 1. **The sources never write.** FIOS.md, the gate ledgers and GitHub keep their own authors.
    `Move`, `Create` and `SetField` return an error naming the file that owns the card — never a
-   silent no-op, and never a write. Dispatch is refused too, because it claims the feature through
-   vb, which has never heard of these ids.
+   silent no-op, and never a write, with or without dispatch configured. Dispatch is the one
+   exception, and it is opt-in: `hvb queue --charters DIR --work-root DIR` hands `SourceBackend` a
+   `dispatch.Dispatcher` whose config copy has `lock_ttl_minutes` forced to 0, because claiming
+   through vb is what could never work for these ids. Without the pair there are no roles and
+   `DispatchUnavailable` says which flags are missing.
 2. **A card id is an opaque string.** Sources mint ids from content hashes so a stored run keeps
    pointing at the card it was dispatched for. Nothing parses an id; a pull request's number comes
    off its `pr:` label.

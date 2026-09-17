@@ -414,6 +414,14 @@ func defaultDispatchChoice(cfg *config.Config) int {
 	}
 }
 
+// dispatchExplainer is a backend that knows why it cannot dispatch. It is an
+// optional, narrow interface rather than a Backend method so the vb backend —
+// which dispatches for real — needs no change and cannot be given a second
+// answer to keep in step.
+type dispatchExplainer interface {
+	DispatchUnavailable(spec *feature.Spec) error
+}
+
 // openDispatchPicker asks which role to dispatch, pre-selecting the one the
 // feature's labels and status suggest.
 func (m *Model) openDispatchPicker() {
@@ -428,6 +436,16 @@ func (m *Model) openDispatchPicker() {
 	}
 	available := m.backend.Roles()
 	if len(available) == 0 {
+		// A backend with no roles is two different facts, and telling them
+		// apart matters: a VirtualBoard workspace missing its charters, or
+		// a board over read-only sources that dispatches nothing at all.
+		// Before this, both got the charters message — so pressing d on a
+		// GitHub issue sent the user to .virtualboard/agents, a directory
+		// that does not exist and that this board never reads.
+		if explainer, ok := m.backend.(dispatchExplainer); ok {
+			m.setError(explainer.DispatchUnavailable(card.Spec))
+			return
+		}
 		m.setError(fmt.Errorf("no agent charters in .virtualboard/agents — cannot pick a role"))
 		return
 	}

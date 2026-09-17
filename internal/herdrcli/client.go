@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,8 +28,9 @@ import (
 
 // Binary is the executable looked up when Client.Bin is empty. Herdr injects
 // HERDR_BIN_PATH into the panes it manages, so a plugin running inside Herdr
-// uses the exact binary that spawned it.
-const Binary = "herdr"
+// uses the exact binary that spawned it. The fallback is this fork's
+// distribution name, `bora`; see FORK.md.
+const Binary = "bora"
 
 // DefaultMinVersion and DefaultMinProtocol are the compatibility FLOOR hvb
 // speaks to, not the one exact build it speaks to.
@@ -60,6 +62,11 @@ const (
 // on an agent.
 const DefaultTimeout = 30 * time.Second
 
+// EnvBinPath names the host executable. The host injects it into every pane it
+// manages, so a plugin running inside the host uses the exact binary that
+// spawned it.
+const EnvBinPath = "HERDR_BIN_PATH"
+
 // Client runs host CLI commands.
 type Client struct {
 	// Bin is the host executable. Empty falls back to Binary on PATH.
@@ -72,7 +79,34 @@ type Client struct {
 }
 
 // New builds a client using the ambient host environment.
-func New() *Client { return &Client{Bin: os.Getenv("HERDR_BIN_PATH")} }
+func New() *Client { return &Client{Bin: TrustedBinPath(os.Getenv(EnvBinPath))} }
+
+// TrustedBinPath accepts an HERDR_BIN_PATH value only when it names an
+// absolute path to a regular executable file, and returns "" otherwise so the
+// caller falls back to Binary on PATH.
+//
+// This value is re-executed with no argument review, and hvb inherits it from
+// an environment a dispatched agent also writes to. A bare name or a relative
+// path would resolve against PATH or against the process cwd — which during a
+// dispatch is a repository an agent has just been writing files into, so
+// dropping a `bora` there would be enough to be run. Requiring an absolute
+// path to something already executable removes that whole class of hijack
+// without needing to know what the legitimate path is.
+//
+// Rejection is silent, unlike a malformed version floor: the floor is operator
+// intent worth an error, while this variable is host-injected, and the safe
+// response to a value that does not look host-injected is to ignore it.
+func TrustedBinPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !filepath.IsAbs(raw) {
+		return ""
+	}
+	info, err := os.Stat(raw)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return ""
+	}
+	return raw
+}
 
 func (c *Client) bin() string {
 	if c.Bin != "" {

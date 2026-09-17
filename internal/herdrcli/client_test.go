@@ -186,6 +186,66 @@ func TestVersionOrdersFieldWiseNotLexicographically(t *testing.T) {
 	}
 }
 
+// HERDR_BIN_PATH keeps precedence, so a plugin pane uses the exact binary that
+// spawned it; the fallback is this fork's own distribution name.
+func TestBinaryFallsBackToBora(t *testing.T) {
+	if got := (&Client{}).bin(); got != "bora" {
+		t.Errorf("bin() with no HERDR_BIN_PATH = %q, want bora", got)
+	}
+	host := filepath.Join(t.TempDir(), "bora")
+	if err := os.WriteFile(host, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvBinPath, host)
+	if got := New().bin(); got != host {
+		t.Errorf("bin() = %q, want the HERDR_BIN_PATH value %q", got, host)
+	}
+}
+
+// HERDR_BIN_PATH is re-executed with no argument review, and hvb inherits it
+// from an environment a dispatched agent also writes to. Anything that is not
+// already an absolute path to an executable file must be ignored: a bare name
+// or a relative path resolves against PATH or against the process cwd, which
+// during a dispatch is a repository an agent has been writing files into.
+func TestBinPathRejectsAnythingNotAnAbsoluteExecutable(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "bora")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notExecutable := filepath.Join(dir, "plain")
+	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rejected := map[string]string{
+		"a bare name":        "bora",
+		"a relative path":    "./bora",
+		"a parent-relative":  "../bin/bora",
+		"empty":              "",
+		"whitespace":         "   ",
+		"a missing file":     filepath.Join(dir, "absent"),
+		"a directory":        dir,
+		"a non-executable":   notExecutable,
+		"a shell fragment":   "bora; rm -rf /",
+		"a relative tempdir": filepath.Base(executable),
+	}
+	for name, raw := range rejected {
+		if got := TrustedBinPath(raw); got != "" {
+			t.Errorf("%s: TrustedBinPath(%q) = %q, want it ignored", name, raw, got)
+		}
+	}
+	if got := TrustedBinPath(executable); got != executable {
+		t.Errorf("TrustedBinPath(%q) = %q, want it trusted", executable, got)
+	}
+
+	// Ignoring the variable must fall back to PATH, never to an empty argv[0].
+	t.Setenv(EnvBinPath, "bora; rm -rf /")
+	if got := New().bin(); got != Binary {
+		t.Errorf("bin() after a rejected HERDR_BIN_PATH = %q, want %q", got, Binary)
+	}
+}
+
 func TestPanesDecodesTheEnvelope(t *testing.T) {
 	client, _ := fakeHerdr(t, `cat <<'EOF'
 {"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","label":"ftr-0001","cwd":"/project","agent":"claude","agent_status":"working","focused":true},{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","terminal_title_stripped":"zsh","cwd":"/project","agent_status":"unknown"}]}}

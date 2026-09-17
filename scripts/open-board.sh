@@ -14,7 +14,7 @@
 # not parse a pane list is worse than one that opens a second board.
 set -uo pipefail
 
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
+herdr_bin="${HERDR_BIN_PATH:-bora}"
 
 open_pane() {
   exec "$herdr_bin" plugin pane open \

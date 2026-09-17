@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
-# Local-development install: build hvb, link this checkout as a herdr plugin,
-# and optionally add the keybinding.
+# Local-development install: build hvb, link this checkout as a plugin of the
+# host terminal manager, and optionally add the keybinding.
 #
-# This is NOT what `herdr plugin install virtualboard/herdr-virtualboard` runs — that
-# path uses only the [[build]] steps in herdr-plugin.toml. Use this script when
-# you are working on the plugin itself and want herdr to run your checkout.
+# This is NOT what `bora plugin install virtualboard/herdr-virtualboard` runs —
+# that path uses only the [[build]] steps in herdr-plugin.toml. Use this script
+# when you are working on the plugin itself and want the host to run your
+# checkout.
 #
 #   ./scripts/install.sh              build, link, and install the CLI
-#   ./scripts/install.sh --keybinding also add prefix+shift+v to herdr's config
+#   ./scripts/install.sh --keybinding also add prefix+shift+v to the host config
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
+herdr_bin="${HERDR_BIN_PATH:-bora}"
 
 add_keybinding=false
 for arg in "$@"; do
   case "$arg" in
     --keybinding) add_keybinding=true ;;
     -h|--help)
-      sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -30,7 +31,7 @@ for arg in "$@"; do
 done
 
 command -v "$herdr_bin" >/dev/null 2>&1 || {
-  echo "install.sh: herdr not found (set HERDR_BIN_PATH or install herdr)" >&2
+  echo "install.sh: $herdr_bin not found (set HERDR_BIN_PATH or install bora)" >&2
   exit 1
 }
 
@@ -45,24 +46,36 @@ echo "==> linking the plugin"
 "$herdr_bin" plugin link "$repo_root" || echo "install.sh: plugin link reported an error (already linked?)" >&2
 
 if [ "$add_keybinding" = true ]; then
-  config="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml"
-  mkdir -p "$(dirname "$config")"
+  # The config directory is asked of the host rather than guessed: this fork
+  # keeps its config under ~/.config/bora, upstream uses ~/.config/herdr, and
+  # HERDR_NAMESPACE moves it again. `status` already reports the socket, which
+  # lives in that directory, so its dirname is the answer straight from the
+  # running server.
+  socket="$("$herdr_bin" status 2>/dev/null | sed -n 's/^  socket: *//p' | head -1)"
+  if [ -n "$socket" ]; then
+    config_dir="$(dirname "$socket")"
+  else
+    config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/bora"
+    echo "install.sh: no running server to ask; assuming $config_dir" >&2
+  fi
+  config="$config_dir/config.toml"
+  mkdir -p "$config_dir"
   if grep -q "open-virtualboard" "$config" 2>/dev/null; then
     echo "install.sh: the keybinding is already in $config"
   else
     # prefix+shift+v, deliberately not prefix+v: lowercase single letters are
-    # where herdr keeps its own pane-focus bindings.
-    cat >>"$config" <<'TOML'
+    # where the host keeps its own pane-focus bindings.
+    cat >>"$config" <<TOML
 
 [[keys.command]]
 key = "prefix+shift+v"
 type = "shell"
-command = "herdr plugin action invoke open-virtualboard --plugin herdr-virtualboard"
+command = "$herdr_bin plugin action invoke open-virtualboard --plugin herdr-virtualboard"
 description = "open the VirtualBoard kanban (overlay)"
 TOML
     echo "install.sh: added prefix+shift+v to $config"
     "$herdr_bin" server reload-config >/dev/null 2>&1 || \
-      echo "install.sh: run \`herdr server reload-config\` to pick up the keybinding" >&2
+      echo "install.sh: run \`$herdr_bin server reload-config\` to pick up the keybinding" >&2
   fi
 fi
 

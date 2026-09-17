@@ -10,15 +10,16 @@ import (
 	"time"
 )
 
-// fakeHerdr writes a stub `herdr` that records argv and replies from a case
+// fakeHerdr writes a stub host CLI that records argv and replies from a case
 // statement on the subcommand. The recorded argv is the point: these tests pin
-// the exact command lines verified against Herdr 0.9.0, so a careless edit to a
-// flag name fails here rather than at dispatch time.
+// the exact command lines verified against `bora <group> --help` on bora
+// 0.48.0, so a careless edit to a flag name fails here rather than at dispatch
+// time.
 func fakeHerdr(t *testing.T, script string) (*Client, func() []string) {
 	t.Helper()
 	dir := t.TempDir()
 	argvLog := filepath.Join(dir, "argv.log")
-	path := filepath.Join(dir, "herdr")
+	path := filepath.Join(dir, "bora")
 	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argvLog + "\n" + script + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -38,15 +39,17 @@ func fakeHerdr(t *testing.T, script string) (*Client, func() []string) {
 	}
 }
 
+// supportedStatus is the real `bora status` report from bora 0.48.0 / protocol
+// 25, trimmed to the keys Status parses.
 const supportedStatus = `cat <<'EOF'
 client:
-  version: 0.9.0
-  channel: stable
-  protocol: 22
+  version: 0.48.0
+  channel: preview
+  protocol: 25
 
 server:
   status: running
-  version: 0.9.0
+  version: 0.48.0
   socket: /tmp/herdr.sock
 EOF`
 
@@ -56,37 +59,129 @@ func TestStatusParsesTheYAMLishReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if status.ClientProtocol != 22 {
+	if status.ClientProtocol != 25 {
 		t.Errorf("ClientProtocol = %d", status.ClientProtocol)
 	}
-	if status.ServerVersion != "0.9.0" || !status.ServerRunning {
+	if status.ServerVersion != "0.48.0" || !status.ServerRunning {
 		t.Errorf("server = %q running=%v", status.ServerVersion, status.ServerRunning)
 	}
+	// The socket file is still named herdr.sock on this fork's host; only the
+	// directory moved. Do not "fix" this fixture.
 	if status.Socket != "/tmp/herdr.sock" {
 		t.Errorf("Socket = %q", status.Socket)
 	}
 }
 
-func TestGateAcceptsTheSupportedBuild(t *testing.T) {
+// The floor must be compared as semver, never as a string: "0.48.0" sorts
+// BELOW "0.9.0" lexicographically because '4' < '9', so a string comparison
+// rejects the very host this fork targets. The first assertion proves the trap
+// is real; the second proves the gate is not caught by it.
+func TestGateAcceptsAHostNewerThanTheVersionFloor(t *testing.T) {
+	if !("0.48.0" < DefaultMinVersion) {
+		t.Fatalf("the lexicographic trap is gone: %q no longer sorts below %q", "0.48.0", DefaultMinVersion)
+	}
 	client, _ := fakeHerdr(t, supportedStatus)
 	if err := client.Gate(context.Background()); err != nil {
-		t.Fatalf("Gate on %s/protocol %d: %v", SupportedVersion, SupportedProtocol, err)
+		t.Fatalf("Gate on herdr 0.48.0 / protocol 25 with floor %s/%d: %v",
+			DefaultMinVersion, DefaultMinProtocol, err)
 	}
 }
 
-// The gate is policy, not negotiation: a different version or protocol must
-// fail before hvb creates layout or launches an agent.
-func TestGateRejectsEverythingElse(t *testing.T) {
+// A protocol above the floor is the ordinary case on a host that keeps
+// releasing; the old equality check failed every one of them.
+func TestGateAcceptsAProtocolAboveTheFloor(t *testing.T) {
+	client, _ := fakeHerdr(t, strings.ReplaceAll(supportedStatus, "protocol: 25", "protocol: 26"))
+	if err := client.Gate(context.Background()); err != nil {
+		t.Fatalf("Gate on protocol 26 with floor %d: %v", DefaultMinProtocol, err)
+	}
+}
+
+// The floor is still policy, not negotiation: anything below it must fail
+// before hvb creates layout or launches an agent.
+func TestGateRejectsHostsBelowTheFloor(t *testing.T) {
 	cases := map[string]string{
-		"old server":     strings.ReplaceAll(supportedStatus, "version: 0.9.0\n  socket", "version: 0.8.1\n  socket"),
-		"wrong protocol": strings.ReplaceAll(supportedStatus, "protocol: 22", "protocol: 21"),
-		"server down":    strings.ReplaceAll(supportedStatus, "status: running", "status: stopped"),
+		"older major.minor": strings.ReplaceAll(supportedStatus, "version: 0.48.0\n  socket", "version: 0.8.1\n  socket"),
+		"older protocol":    strings.ReplaceAll(supportedStatus, "protocol: 25", "protocol: 24"),
+		"server down":       strings.ReplaceAll(supportedStatus, "status: running", "status: stopped"),
+		"unparseable":       strings.ReplaceAll(supportedStatus, "version: 0.48.0\n  socket", "version: nightly\n  socket"),
 	}
 	for name, script := range cases {
 		client, _ := fakeHerdr(t, script)
 		err := client.Gate(context.Background())
 		if !errors.Is(err, ErrIncompatible) {
 			t.Errorf("%s: Gate = %v, want ErrIncompatible", name, err)
+		}
+	}
+}
+
+// The override is the operator's escape hatch: upstream Herdr 0.9.0 speaks
+// protocol 22 and must be reachable without recompiling hvb.
+func TestGateHonoursTheProtocolOverride(t *testing.T) {
+	upstream := strings.ReplaceAll(
+		strings.ReplaceAll(supportedStatus, "protocol: 25", "protocol: 22"),
+		"version: 0.48.0", "version: 0.9.0")
+
+	client, _ := fakeHerdr(t, upstream)
+	if err := client.Gate(context.Background()); !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("Gate on protocol 22 without an override = %v, want ErrIncompatible", err)
+	}
+
+	t.Setenv(EnvMinProtocol, "22")
+	client, _ = fakeHerdr(t, upstream)
+	if err := client.Gate(context.Background()); err != nil {
+		t.Fatalf("Gate on protocol 22 with %s=22: %v", EnvMinProtocol, err)
+	}
+}
+
+// A malformed override must fail loudly. Silently falling back to the compiled
+// floor would leave an operator believing they had lowered a gate that is
+// still shut.
+func TestResolvedFloorRejectsMalformedOverrides(t *testing.T) {
+	t.Setenv(EnvMinProtocol, "twenty-five")
+	if _, err := ResolvedFloor(); err == nil {
+		t.Errorf("ResolvedFloor with a non-numeric protocol = nil, want an error")
+	}
+	t.Setenv(EnvMinProtocol, "")
+	t.Setenv(EnvMinVersion, "soon")
+	if _, err := ResolvedFloor(); err == nil {
+		t.Errorf("ResolvedFloor with a non-semver version = nil, want an error")
+	}
+}
+
+func TestVersionOrdersFieldWiseNotLexicographically(t *testing.T) {
+	cases := []struct {
+		left, right string
+		less        bool
+	}{
+		{"0.48.0", "0.9.0", false}, // the trap: true as strings
+		{"0.9.0", "0.48.0", true},
+		{"0.10.0", "0.9.0", false}, // the same trap one digit earlier
+		{"0.9.0", "0.10.0", true},
+		{"0.48.12", "0.48.9", false}, // and again in the patch field
+		{"0.48.9", "0.48.12", true},
+		{"0.9.0", "0.9.0", false},
+		{"0.8.1", "0.9.0", true},
+		{"1.0.0", "0.48.0", false},
+		{"0.48.0-rc1", "0.48.0", false}, // metadata is discarded, not ranked
+		{"v0.48.0", "0.48.0", false},
+		{"0.9", "0.9.1", true}, // a missing field reads as zero
+	}
+	for _, tc := range cases {
+		left, ok := parseVersion(tc.left)
+		if !ok {
+			t.Fatalf("parseVersion(%q) failed", tc.left)
+		}
+		right, ok := parseVersion(tc.right)
+		if !ok {
+			t.Fatalf("parseVersion(%q) failed", tc.right)
+		}
+		if got := left.less(right); got != tc.less {
+			t.Errorf("%q less %q = %v, want %v", tc.left, tc.right, got, tc.less)
+		}
+	}
+	for _, raw := range []string{"", "nightly", "0.x.1", "1.2.3.4", "-1.0.0"} {
+		if _, ok := parseVersion(raw); ok {
+			t.Errorf("parseVersion(%q) accepted a non-version", raw)
 		}
 	}
 }

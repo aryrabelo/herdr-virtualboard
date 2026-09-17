@@ -186,13 +186,13 @@ case "$*" in
   *status*)
     cat <<'STATUS'
 client:
-  version: 0.9.0
-  channel: stable
-  protocol: 22
+  version: 0.48.0
+  channel: preview
+  protocol: 25
 
 server:
   status: running
-  version: 0.9.0
+  version: 0.48.0
   socket: /tmp/herdr-stub.sock
 STATUS
     ;;

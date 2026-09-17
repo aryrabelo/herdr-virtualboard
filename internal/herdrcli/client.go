@@ -6,9 +6,10 @@
 // board is reconciled from `vb` and from polled pane state, so there is nothing
 // a long-lived socket would buy that is worth owning a second protocol for.
 //
-// Every argv in this file was verified against `herdr <group>` usage output on
-// Herdr 0.9.0 / socket protocol 22. Do not change one from memory: run the bare
-// group command (`herdr pane`, `herdr agent`) and read the usage it prints.
+// Every argv in this file was verified against `bora <group> --help` usage
+// output on bora 0.48.0 / socket protocol 25, and against Herdr 0.9.0 upstream
+// before that. Do not change one from memory: run the group command
+// (`bora pane --help`, `bora agent --help`) and read the usage it prints.
 package herdrcli
 
 import (
@@ -19,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,32 +30,48 @@ import (
 // uses the exact binary that spawned it.
 const Binary = "herdr"
 
-// SupportedVersion and SupportedProtocol are the exact Herdr build hvb speaks
-// to. Like herdr-board, this is a policy gate rather than a negotiation: a
-// different protocol may have moved a field this package reads positionally out
-// of a JSON result, and failing the dispatch is better than launching an agent
-// into a pane hvb can no longer track.
+// DefaultMinVersion and DefaultMinProtocol are the compatibility FLOOR hvb
+// speaks to, not the one exact build it speaks to.
+//
+// Upstream pinned an exact version and protocol, reasoning that a different
+// protocol may have moved a field this package reads out of a JSON result, and
+// that failing the dispatch beats launching an agent into a pane hvb can no
+// longer track. That intent is kept. What changes is "exactly this build"
+// becoming "this build or newer": the host ships releases far faster than this
+// plugin, and an exact pin fails on every release that moved nothing hvb reads.
+//
+// The protocol floor is 25 because that is the protocol whose CLI surface was
+// verified argv-by-argv against this package. Upstream Herdr 0.9.0 speaks
+// protocol 22; run against it with HVB_MIN_HERDR_PROTOCOL=22.
 const (
-	SupportedVersion  = "0.9.0"
-	SupportedProtocol = 22
+	DefaultMinVersion  = "0.9.0"
+	DefaultMinProtocol = 25
+)
+
+// EnvMinVersion and EnvMinProtocol lower or raise the floor from the
+// environment, so an operator on a host this build has never seen can unblock
+// themselves without recompiling hvb.
+const (
+	EnvMinVersion  = "HVB_MIN_HERDR_VERSION"
+	EnvMinProtocol = "HVB_MIN_HERDR_PROTOCOL"
 )
 
 // DefaultTimeout bounds a single herdr invocation that is not expected to wait
 // on an agent.
 const DefaultTimeout = 30 * time.Second
 
-// Client runs herdr CLI commands.
+// Client runs host CLI commands.
 type Client struct {
-	// Bin is the herdr executable; empty resolves HERDR_BIN_PATH then PATH.
+	// Bin is the host executable. Empty falls back to Binary on PATH.
 	Bin string
-	// Session targets a named Herdr session. Empty uses the default session,
+	// Session targets a named host session. Empty uses the default session,
 	// which is what a plugin pane inherits.
 	Session string
 	// Timeout bounds one invocation. Zero means DefaultTimeout.
 	Timeout time.Duration
 }
 
-// New builds a client using the ambient Herdr environment.
+// New builds a client using the ambient host environment.
 func New() *Client { return &Client{Bin: os.Getenv("HERDR_BIN_PATH")} }
 
 func (c *Client) bin() string {
@@ -74,8 +92,8 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("herdr %s: %s (exit %d)", strings.Join(e.Args, " "), e.Message, e.Code)
 }
 
-// ErrIncompatible is returned by Gate when the running Herdr is not the exact
-// supported version and protocol.
+// ErrIncompatible is returned by Gate when the running Herdr is older than the
+// compatibility floor, or when the floor itself is misconfigured.
 var ErrIncompatible = errors.New("unsupported herdr version")
 
 // Status is the decoded `herdr status` report. The command prints YAML-ish
@@ -122,13 +140,93 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 	return status, nil
 }
 
-// Gate enforces the supported-version policy. Callers run it before any
-// operation that creates layout or launches an agent.
+// Floor is the compatibility floor Gate enforces.
+type Floor struct {
+	Version  string
+	Protocol int
+}
+
+// ResolvedFloor is the floor actually in effect: the compiled defaults with the
+// operator's environment overrides applied.
+//
+// A malformed override is an error, not a silent fallback. An operator who
+// exported the variable is entitled to know it did not take, rather than
+// discovering later that the floor they thought they lowered was still in
+// force.
+func ResolvedFloor() (Floor, error) {
+	floor := Floor{Version: DefaultMinVersion, Protocol: DefaultMinProtocol}
+	if raw := strings.TrimSpace(os.Getenv(EnvMinVersion)); raw != "" {
+		if _, ok := parseVersion(raw); !ok {
+			return floor, fmt.Errorf("%s=%q is not a semantic version", EnvMinVersion, raw)
+		}
+		floor.Version = raw
+	}
+	if raw := strings.TrimSpace(os.Getenv(EnvMinProtocol)); raw != "" {
+		protocol, err := strconv.Atoi(raw)
+		if err != nil || protocol < 0 {
+			return floor, fmt.Errorf("%s=%q is not a protocol number", EnvMinProtocol, raw)
+		}
+		floor.Protocol = protocol
+	}
+	return floor, nil
+}
+
+// version is a three-field semantic version.
+//
+// Versions must never be compared as strings. "0.48.0" sorts BELOW "0.9.0"
+// lexicographically, because '4' < '9', so a string floor rejects every host
+// release past 0.9 — which is the exact breakage this fork exists to fix.
+type version struct{ major, minor, patch int }
+
+// parseVersion reads major[.minor[.patch]], tolerating a leading `v` and
+// discarding prerelease or build metadata (`0.48.0-rc1+abc`).
+func parseVersion(raw string) (version, bool) {
+	raw = strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	if cut := strings.IndexAny(raw, "-+"); cut >= 0 {
+		raw = raw[:cut]
+	}
+	fields := strings.Split(raw, ".")
+	if raw == "" || len(fields) > 3 {
+		return version{}, false
+	}
+	var parsed version
+	into := [...]*int{&parsed.major, &parsed.minor, &parsed.patch}
+	for i, field := range fields {
+		n, err := strconv.Atoi(field)
+		if err != nil || n < 0 {
+			return version{}, false
+		}
+		*into[i] = n
+	}
+	return parsed, true
+}
+
+// less orders two versions field by field, most significant first.
+func (v version) less(other version) bool {
+	if v.major != other.major {
+		return v.major < other.major
+	}
+	if v.minor != other.minor {
+		return v.minor < other.minor
+	}
+	return v.patch < other.patch
+}
+
+// Gate enforces the compatibility floor. Callers run it before any operation
+// that creates layout or launches an agent.
 //
 // The one deliberate exception, mirroring herdr-board, is cleanup and liveness
 // for panes hvb already owns: CloseP{ane} and pane reads stay ungated so a Herdr
 // upgrade cannot strand a run hvb is responsible for tidying up.
 func (c *Client) Gate(ctx context.Context) error {
+	floor, err := ResolvedFloor()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrIncompatible, err)
+	}
+	required, ok := parseVersion(floor.Version)
+	if !ok {
+		return fmt.Errorf("%w: floor %q is not a semantic version", ErrIncompatible, floor.Version)
+	}
 	status, err := c.Status(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: cannot read herdr status: %v", ErrIncompatible, err)
@@ -136,11 +234,15 @@ func (c *Client) Gate(ctx context.Context) error {
 	if !status.ServerRunning {
 		return fmt.Errorf("%w: herdr server is not running", ErrIncompatible)
 	}
-	if status.ServerVersion != SupportedVersion {
-		return fmt.Errorf("%w: need herdr %s, found %s", ErrIncompatible, SupportedVersion, status.ServerVersion)
+	found, ok := parseVersion(status.ServerVersion)
+	if !ok {
+		return fmt.Errorf("%w: cannot read herdr version %q", ErrIncompatible, status.ServerVersion)
 	}
-	if status.ClientProtocol != SupportedProtocol {
-		return fmt.Errorf("%w: need socket protocol %d, found %d", ErrIncompatible, SupportedProtocol, status.ClientProtocol)
+	if found.less(required) {
+		return fmt.Errorf("%w: need herdr %s or newer, found %s", ErrIncompatible, floor.Version, status.ServerVersion)
+	}
+	if status.ClientProtocol < floor.Protocol {
+		return fmt.Errorf("%w: need socket protocol %d or newer, found %d", ErrIncompatible, floor.Protocol, status.ClientProtocol)
 	}
 	return nil
 }

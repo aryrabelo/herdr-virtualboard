@@ -58,7 +58,7 @@ func TestBlockedStartupParksTheTaskInsteadOfFailing(t *testing.T) {
   *"tab list"*) echo '{"id":"x","result":{"tabs":[]}}' ;;
   *"tab create"*) echo '{"id":"x","result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' ;;
   *"pane split"*) echo '{"id":"x","result":{"pane":{"pane_id":"w1:p3"}}}' ;;
-  *status*) printf 'client:\n  version: 0.9.0\n  protocol: 22\n\nserver:\n  status: running\n  version: 0.9.0\n  socket: /tmp/s\n' ;;
+  *status*) printf 'client:\n  version: 0.48.0\n  protocol: 25\n\nserver:\n  status: running\n  version: 0.48.0\n  socket: /tmp/s\n' ;;
   *) echo '{"id":"x","result":{}}' ;;
 esac`
 	h := newHarness(t, map[string]feature.Status{"FTR-0001": feature.InProgress}, script)

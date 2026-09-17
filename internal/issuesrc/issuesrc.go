@@ -209,6 +209,8 @@ func spec(card usinasrc.Card, queue usinasrc.Queue, frontier fila.Frontier) *fea
 			Title:  strings.TrimSpace(card.Title),
 			Status: feature.Status(string(column)),
 			Owner:  owner,
+			// Empty on the usina path: it does not send updatedAt.
+			Updated: card.UpdatedAt,
 			// Priority is deliberately left empty. vb's priority is a
 			// declared word (critical/high/…) and the frontier's rank is
 			// a measured position; writing the rank here would make the

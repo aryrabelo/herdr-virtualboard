@@ -50,6 +50,11 @@ type Card struct {
 	Closed    bool
 	Labels    []string
 	Assignees []string
+	// UpdatedAt is RFC3339 when the answering binary sent one and empty
+	// otherwise: usina's CAMPOS_LISTA does not include it (measured
+	// 2026-09-17), gh does when asked. The board shows no age rather than
+	// a made-up one.
+	UpdatedAt string
 }
 
 // Origin says who answered and, when the preferred source did not, why.
@@ -86,7 +91,7 @@ const (
 
 // ghFields is the exact field set the fallback asks gh for. The names match
 // what this package decodes from usina, which is why one decoder serves both.
-const ghFields = "number,title,url,state,labels,assignees"
+const ghFields = "number,title,url,state,labels,assignees,updatedAt"
 
 // Load reads label's issues of ceoRepo's queue, at most limit of them.
 //
@@ -263,6 +268,7 @@ type issue struct {
 	Assignees []struct {
 		Login string `json:"login"`
 	} `json:"assignees"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // decodeCards turns one source's array into cards. source names the binary in
@@ -303,6 +309,7 @@ func decodeCards(source string, stdout []byte) ([]Card, error) {
 			Closed:    closed,
 			Labels:    labels,
 			Assignees: assignees,
+			UpdatedAt: strings.TrimSpace(raw.UpdatedAt),
 		})
 	}
 	return cards, nil

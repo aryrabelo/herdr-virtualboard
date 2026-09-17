@@ -246,8 +246,8 @@ func (m *Model) renderColumn(status feature.Status, width, height int, focused b
 	return out
 }
 
-// cardHeight is how many rows one card occupies: title, meta, spacer.
-const cardHeight = 3
+// cardHeight is how many rows one card occupies: header, title, chips, spacer.
+const cardHeight = 4
 
 func (m *Model) gutter(width, inner int) string {
 	if width <= inner {
@@ -256,7 +256,19 @@ func (m *Model) gutter(width, inner int) string {
 	return paint(m.palette.Border, strings.Repeat("│", 1)) + strings.Repeat(" ", width-inner-1)
 }
 
-// renderCard draws one card as three rows.
+// renderCard draws one card as four rows, in the shape the owner approved
+// from the Factory board (2026-09-17):
+//
+//	▸ ceo-bora#150 (issue) · @aryrabelo · 1d        ← who and what, dim
+//	  Pagar a divida de lint do codigo importado…   ← the title, on its own
+//	  rumo:grilling  project:bugtoprompt            ← chips: state the reader acts on
+//
+// The header names the card (id, kind, owner, age, the issue a PR closes) so
+// the reader knows what they are looking at before reading a word of the
+// title; the title gets a whole row because a 26-column cell cannot hold an
+// id and a sentence side by side; and the chips row carries every label the
+// sources did not mint for themselves, since `hvb:*` labels are the board's
+// own bookkeeping and mean nothing to the person reading.
 func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 	marker := " "
 	markerColour := ""
@@ -266,19 +278,35 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 		marker, markerColour = runGlyph(latest.State), m.palette.Dim
 	}
 
+	var head []string
 	id := cardID(card.Spec)
-	head := fmt.Sprintf("%s %s %s", paint(markerColour, marker), paint(m.palette.Dim, id),
-		truncate(card.Spec.Title, width-len(id)-4))
+	if kind := cardKind(card.Spec); kind != "" {
+		id += " " + paint(m.cardKindColour(kind), "("+kind+")") + m.palette.Dim
+	}
+	head = append(head, id)
+	if card.Spec.Claimed() {
+		head = append(head, "@"+card.Spec.Owner)
+	}
+	// Only a source-backed card shows its age: a VirtualBoard spec also
+	// carries created/updated, and its board never showed one.
+	if sourceKind(card.Spec) != "" {
+		if age, ok := specAge(card.Spec, time.Now()); ok {
+			head = append(head, shortAge(age))
+		}
+	}
+	headLine := paint(markerColour, marker) + " " + paint(m.palette.Dim, strings.Join(head, " · "))
+	if links := cardLinkedIssuesLabel(card.Spec); links != "" {
+		headLine += "  " + paint(m.palette.Accent, links)
+	}
 
-	var meta []string
+	titleLine := "  " + truncate(card.Spec.Title, width-3)
+
+	var chips []string
 	if card.Spec.Priority != "" {
-		meta = append(meta, paint(m.palette.Priority(card.Spec.Priority), card.Spec.Priority))
+		chips = append(chips, paint(m.palette.Priority(card.Spec.Priority), card.Spec.Priority))
 	}
 	if card.Spec.Complexity != "" {
-		meta = append(meta, paint(m.palette.Dim, card.Spec.Complexity))
-	}
-	if card.Spec.Claimed() {
-		meta = append(meta, paint(m.palette.Accent, "@"+card.Spec.Owner))
+		chips = append(chips, paint(m.palette.Dim, card.Spec.Complexity))
 	}
 	if card.Active != nil {
 		label := card.Active.Role + " " + shortDuration(card.Active.Duration())
@@ -287,9 +315,9 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 			// the user is looking at; that is worth one character.
 			label = "⑂ " + label
 		}
-		meta = append(meta, paint(m.palette.RunState(card.Active.State), label))
+		chips = append(chips, paint(m.palette.RunState(card.Active.State), label))
 	} else if latest := latestRun(card.Runs); latest != nil && latest.PullRequest != nil && latest.PullRequest.Opened {
-		meta = append(meta, paint(m.palette.Succeeded, "PR"))
+		chips = append(chips, paint(m.palette.Succeeded, "PR"))
 	} else if criteria := card.Spec.AcceptanceCriteria(); len(criteria) > 0 {
 		done := 0
 		for _, criterion := range criteria {
@@ -297,12 +325,15 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 				done++
 			}
 		}
-		meta = append(meta, paint(m.palette.Dim, fmt.Sprintf("%d/%d", done, len(criteria))))
+		chips = append(chips, paint(m.palette.Dim, fmt.Sprintf("%d/%d", done, len(criteria))))
 	}
-	meta = append(meta, m.sourceMeta(card)...)
-	metaLine := "   " + strings.Join(meta, " ")
+	chips = append(chips, m.sourceMeta(card)...)
+	for _, label := range visibleLabels(card.Spec) {
+		chips = append(chips, paint(m.palette.Dim, label))
+	}
+	chipLine := "  " + strings.Join(chips, "  ")
 
-	lines := []string{fit(head, width), fit(metaLine, width)}
+	lines := []string{fit(headLine, width), fit(titleLine, width), fit(chipLine, width)}
 	if selected {
 		for index, line := range lines {
 			lines[index] = paint(m.palette.Invert, line)
@@ -396,4 +427,13 @@ func shortDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
+}
+
+// shortAge is shortDuration for how long ago a card changed: a run lasts
+// minutes, a pull request sits for weeks, and "1128h" tells nobody anything.
+func shortAge(d time.Duration) string {
+	if d < 24*time.Hour {
+		return shortDuration(d)
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }

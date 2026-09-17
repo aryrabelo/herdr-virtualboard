@@ -42,7 +42,11 @@ func (m *Model) detailLines(card *Card, width int) []string {
 	blank := func() { out = append(out, "") }
 	rule := func() { out = append(out, " "+paint(m.palette.Border, strings.Repeat("─", inner))) }
 
-	add("%s  %s", paint(m.palette.Bold, spec.ID), paint(m.palette.Bold, spec.Title))
+	heading := paint(m.palette.Bold, spec.ID)
+	if kind := cardKind(spec); kind != "" {
+		heading += " " + paint(m.cardKindColour(kind), "("+kind+")")
+	}
+	add("%s  %s", heading, paint(m.palette.Bold, spec.Title))
 	rule()
 	add("%s  %s", paint(m.palette.Dim, "status    "), paint(m.palette.Status(spec.Status), string(spec.Status)))
 	add("%s  %s", paint(m.palette.Dim, "owner     "), orDash(spec.Owner))
@@ -50,8 +54,18 @@ func (m *Model) detailLines(card *Card, width int) []string {
 		paint(m.palette.Dim, "complexity"), orDash(spec.Complexity))
 	add("%s  %s   %s  %s", paint(m.palette.Dim, "created   "), orDash(spec.Created),
 		paint(m.palette.Dim, "updated   "), orDash(spec.Updated))
-	if len(spec.Labels) > 0 {
-		add("%s  %s", paint(m.palette.Dim, "labels    "), strings.Join(spec.Labels, " "))
+	// The issue a pull request closes, which is what tells the reader what
+	// the change is FOR, and which binary answered for an issue. Both used to
+	// be reachable only as raw `hvb:*` tokens in the labels row; the row now
+	// carries just the labels the reader can act on.
+	if links := cardLinkedIssuesLabel(spec); links != "" {
+		add("%s  %s", paint(m.palette.Dim, "closes    "), paint(m.palette.Accent, links))
+	}
+	if source := cardSource(spec); source != "" {
+		add("%s  %s", paint(m.palette.Dim, "source    "), source)
+	}
+	if labels := visibleLabels(spec); len(labels) > 0 {
+		add("%s  %s", paint(m.palette.Dim, "labels    "), strings.Join(labels, " "))
 	}
 	if len(spec.Dependencies) > 0 {
 		add("%s  %s", paint(m.palette.Dim, "depends   "), strings.Join(spec.Dependencies, " "))

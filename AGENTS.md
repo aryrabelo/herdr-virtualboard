@@ -39,11 +39,38 @@ internal/
   runs/             the run store: the only state hvb owns
   config/           config files and the per-column pipeline policy
   dispatch/         prompt composition, pane-first launch, routing, reconciliation
-  tui/              the kanban board
+  fios/             the owner's own queue: FIOS.md threads and the gates/ ledgers (read-only)
+  ghboard/          this week's pull requests, through the gh CLI (read-only)
+  tui/              the kanban board, over either a workspace or the read-only sources
   cli/              the hvb command tree
 skill/SKILL.md      the contract a dispatched agent is held to
 e2e/                hermetic end-to-end scenarios
 ```
+
+## Two boards, one renderer
+
+`hvb tui` is the board over a VirtualBoard workspace: five lifecycle columns of spec markdown,
+every mutation through vb. `hvb queue --vault DIR --repo owner/name` is the same renderer over
+`internal/fios` and `internal/ghboard` instead.
+
+What makes that cheap is `tui.Backend` (`internal/tui/model.go`): the board's only data seam. The
+read-only board is `tui.SourceBackend` (`internal/tui/backend_sources.go`), which composes anything
+satisfying `tui.Source` — one `Load`, errors per item, never fatal. `internal/tui` deliberately does
+not import `internal/fios` or `internal/ghboard`; the CLI wires the concrete sources in.
+
+Three rules hold there:
+
+1. **The sources never write.** FIOS.md, the gate ledgers and GitHub keep their own authors.
+   `Move`, `Create` and `SetField` return an error naming the file that owns the card — never a
+   silent no-op, and never a write. Dispatch is refused too, because it claims the feature through
+   vb, which has never heard of these ids.
+2. **A card id is an opaque string.** Sources mint ids from content hashes so a stored run keeps
+   pointing at the card it was dispatched for. Nothing parses an id; a pull request's number comes
+   off its `pr:` label.
+3. **`state:canceled` means one thing: a pull request that closed without merging.** It renders as
+   a sixth column, derived in the presentation layer — `feature.Status` still has exactly five
+   values and `internal/feature` and `internal/vb` are untouched by it. The column is not a
+   catch-all: a done card with a label the board does not know stays in Done.
 
 ## Changing the agent contract
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
@@ -73,6 +74,97 @@ func (h *harness) worktreeRun(t *testing.T, branch string) *runs.Run {
 		t.Fatal(err)
 	}
 	return updated
+}
+
+// VB-06. Publishing is the moment an agent's work leaves this machine, under
+// the operator's own credentials and with nobody watching, so the remote it
+// leaves through is the operator's decision. The proof is the bare remote: the
+// branch must not be there afterwards.
+func TestPushIsRefusedForARemoteTheOperatorDidNotAllow(t *testing.T) {
+	h := newHarness(t, map[string]feature.Status{"FTR-0001": feature.InProgress}, noPanes)
+	bare := h.gitRepo(t)
+	h.commitOn(t, "feature/FTR-0001/x", "retry.go")
+	h.worktreeRun(t, "feature/FTR-0001/x")
+	h.dispatcher.Config.Forge.PushRemotes = []string{"upstream"}
+
+	completion, err := h.dispatcher.Complete(context.Background(), "r1", OutcomeSuccess, "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := completion.PullRequest
+	if pr.Pushed || pr.Opened {
+		t.Fatalf("origin is not on the allowlist: %+v", pr)
+	}
+	if !strings.Contains(pr.Reason, "origin") || !strings.Contains(pr.Reason, "push_remotes") {
+		t.Errorf("the reason must name the remote and the setting: %q", pr.Reason)
+	}
+	out, err := exec.Command("git", "-C", bare, "branch", "--list", "feature/FTR-0001/x").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("the branch reached the remote anyway: %s", out)
+	}
+	// The work is not lost, and the run still routes: nothing here may fail a
+	// run that already succeeded.
+	if completion.Moved != feature.Review || completion.Run.State != runs.Succeeded {
+		t.Errorf("Moved = %q, State = %q", completion.Moved, completion.Run.State)
+	}
+}
+
+// An empty allowlist is a refusal, not a wildcard.
+func TestAnEmptyAllowlistPublishesNothing(t *testing.T) {
+	h := newHarness(t, map[string]feature.Status{"FTR-0001": feature.InProgress}, noPanes)
+	bare := h.gitRepo(t)
+	h.commitOn(t, "feature/FTR-0001/x", "retry.go")
+	h.worktreeRun(t, "feature/FTR-0001/x")
+	h.dispatcher.Config.Forge.PushRemotes = nil
+
+	completion, err := h.dispatcher.Complete(context.Background(), "r1", OutcomeSuccess, "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.PullRequest.Pushed {
+		t.Fatalf("an empty allowlist must permit nothing: %+v", completion.PullRequest)
+	}
+	out, _ := exec.Command("git", "-C", bare, "branch", "--list", "feature/FTR-0001/x").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("the branch reached the remote anyway: %s", out)
+	}
+}
+
+// The opt-in gate for an operator who does want to look first. Off by default,
+// because an approved feature is expected to reach a pull request on its own.
+func TestRequireConfirmationStopsBeforePublishing(t *testing.T) {
+	h := newHarness(t, map[string]feature.Status{"FTR-0001": feature.InProgress}, noPanes)
+	bare := h.gitRepo(t)
+	h.commitOn(t, "feature/FTR-0001/x", "retry.go")
+	h.worktreeRun(t, "feature/FTR-0001/x")
+	if config.Default().Forge.RequireConfirmation {
+		t.Fatal("confirmation must be off by default")
+	}
+	h.dispatcher.Config.Forge.RequireConfirmation = true
+
+	completion, err := h.dispatcher.Complete(context.Background(), "r1", OutcomeSuccess, "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := completion.PullRequest
+	if pr.Pushed || pr.Opened {
+		t.Fatalf("confirmation was required: %+v", pr)
+	}
+	if !strings.Contains(pr.Reason, "require_confirmation") {
+		t.Errorf("the reason must name the setting that stopped it: %q", pr.Reason)
+	}
+	// This fixture's remote is a bare path with no host, so there is no
+	// compare page to offer. What the operator does get is where to look.
+	if !strings.Contains(pr.Reason, "feature/FTR-0001/x") || !strings.Contains(pr.Reason, h.root) {
+		t.Errorf("the reason must say which branch, in which checkout: %q", pr.Reason)
+	}
+	out, _ := exec.Command("git", "-C", bare, "branch", "--list", "feature/FTR-0001/x").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("the branch was published anyway: %s", out)
+	}
 }
 
 // The whole point of this path: the agent's work survives even when the pull

@@ -60,6 +60,27 @@ func (d *Dispatcher) openPullRequest(ctx context.Context, run *runs.Run) *runs.P
 		return result
 	}
 
+	// Publishing is where an agent's work leaves this machine, under the
+	// operator's own git and gh credentials, with nobody watching. Which
+	// remote that is allowed to be is the operator's decision: `worktree.remote`
+	// and every `forge.*` key are refused to a project `.hvb.toml`, and this
+	// is the check that makes the refusal mean something at the moment it
+	// matters. The compare URL is offered either way, so a run that stops
+	// here still hands the user somewhere to go.
+	result.URL = remote.CompareURL(worktree.Base, worktree.Branch)
+	if !d.Config.Forge.AllowsRemote(worktree.Remote) {
+		result.Reason = fmt.Sprintf("hvb is not allowed to push to the %q remote: forge.push_remotes "+
+			"lists %s. %d commit(s) are waiting on %s — add the remote to your hvb config, or push it by hand",
+			worktree.Remote, allowedRemotes(d.Config.Forge.PushRemotes), ahead, worktree.Branch)
+		return result
+	}
+	if d.Config.Forge.RequireConfirmation {
+		result.Reason = fmt.Sprintf("forge.require_confirmation is on, so hvb stopped before publishing: "+
+			"%d commit(s) are waiting on %s in %s — push and open the pull request when you have looked at it",
+			ahead, worktree.Branch, worktree.Path)
+		return result
+	}
+
 	if err := repo.Push(ctx, worktree.Remote, worktree.Branch); err != nil {
 		result.Reason = fmt.Sprintf("pushing %s to %s failed: %v", worktree.Branch, worktree.Remote, err)
 		return result
@@ -144,11 +165,12 @@ func (d *Dispatcher) recordPullRequestLink(ctx context.Context, run *runs.Run, p
 	}
 }
 
-func stripUntrustedMarkers(text string) string {
-	for _, marker := range []string{"<untrusted-content>", "</untrusted-content>"} {
-		text = strings.ReplaceAll(text, marker, "")
+// allowedRemotes renders the allowlist for a message the user has to act on.
+func allowedRemotes(remotes []string) string {
+	if len(remotes) == 0 {
+		return "no remotes at all"
 	}
-	return strings.TrimSpace(text)
+	return strings.Join(remotes, ", ")
 }
 
 // CleanupWorktree removes a finished run's checkout and closes its workspace.

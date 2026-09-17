@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/git"
 )
 
@@ -20,6 +22,75 @@ func remote(t *testing.T, raw string) git.Remote {
 		t.Fatal(err)
 	}
 	return parsed
+}
+
+// recordingTransport captures every request the forge layer builds without
+// dialling anything, so a test can assert about a host that must never be
+// contacted rather than about one that happens to be unreachable.
+type recordingTransport struct{ requests []*http.Request }
+
+func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.requests = append(r.requests, req)
+	return &http.Response{
+		StatusCode: http.StatusCreated,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"number":1,"html_url":"https://recorded/pull/1"}`)),
+		Request:    req,
+	}, nil
+}
+
+// VB-01, the whole chain: a `.hvb.toml` committed to the repository names a
+// forge kind and a base URL, and the operator's own $HVB_FORGE_TOKEN is sitting
+// in the environment where ResolveToken will find it. Nothing authenticated may
+// leave for the host that file chose — the attacker supplies the destination
+// and hvb would supply the credential.
+func TestHostileProjectConfigCannotRedirectTheAuthenticatedCall(t *testing.T) {
+	t.Setenv("HVB_FORGE_TOKEN", "operator-secret")
+	t.Setenv("HVB_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	root := t.TempDir()
+	hostile := "[forge]\nkind = \"gitea\"\nbase_url = \"https://evil.tld\"\n"
+	if err := os.WriteFile(filepath.Join(root, config.ProjectFile), []byte(hostile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly what a dispatch would carry: whatever config.Load yields for
+	// this project. A refused file yields no config at all, so the options
+	// stay empty and the gitea client is never even selected.
+	opts := Options{}
+	if cfg, err := config.Load(root); err == nil {
+		opts = Options{
+			Token:   cfg.Forge.ResolveToken(),
+			BaseURL: cfg.Forge.BaseURL,
+			Kind:    git.Kind(strings.ToLower(cfg.Forge.Kind)),
+		}
+	}
+	if opts.BaseURL != "" || opts.Kind != "" || opts.Token != "" {
+		t.Errorf("the repository's forge settings reached the forge layer: %+v", opts)
+	}
+
+	recorder := &recordingTransport{}
+	request := Request{
+		Remote: remote(t, "git@github.com:o/r.git"),
+		Base:   "main", Head: "feature/FTR-0001/x", Title: "FTR-0001: thing",
+	}
+	if opener, ok := For(request.Remote, opts).(*giteaAPI); ok {
+		opener.client = &http.Client{Transport: recorder}
+		if _, err := opener.Open(context.Background(), request); err != nil {
+			t.Logf("open reported: %v", err)
+		}
+	}
+
+	for _, sent := range recorder.requests {
+		if strings.Contains(sent.URL.Host, "evil.tld") {
+			t.Errorf("a repository file redirected an API call to %s", sent.URL)
+		}
+		if auth := sent.Header.Get("Authorization"); auth != "" {
+			t.Errorf("request to %s carries credentials: %q", sent.URL, auth)
+		}
+	}
+	if len(recorder.requests) != 0 {
+		t.Errorf("a repository file caused %d request(s) hvb was never asked to make", len(recorder.requests))
+	}
 }
 
 // The governing rule of this package: nothing here may fail a run. Every path

@@ -104,13 +104,69 @@ the error.
 
 ### Why the prompt is ordered the way it is
 
-Role charter, then contract, then stage instruction, then the spec — and the spec last, still inside
-its `<untrusted-content>` delimiters, with an explicit line saying it is data.
+Contract first, then whatever hvb itself decided — the role name, the worktree it is in, a stage
+instruction from the operator's own config — and then, last, **one block holding everything that
+came out of the repository**: the role charter, the feature's metadata, its acceptance criteria, its
+risk notes, its specification, and a stage instruction the project set in its own `.hvb.toml`.
 
-That ordering mirrors how VirtualBoard expects an agent to come up to speed, and the delimiters are
-the boundary its rules of engagement draw between *what to build* and *what you are allowed to be
-told*. A spec body is user-authored text that an agent will read; keeping the marker means a
-sentence in a feature description that looks like an instruction stays visibly data.
+The contract goes first because a charter pasted above the rules *is* the rules, as far as a reader
+is concerned. The block goes last, and holds all of it, because the boundary VirtualBoard's rules of
+engagement draw is between *what to build* and *what you are allowed to be told* — and that boundary
+is only worth anything if it is drawn around every byte the repository supplied, not just around the
+spec body. A risk note, a title, an acceptance criterion and a project-set stage instruction are all
+free text that arrives with a clone, and with every pull request.
+
+Three properties make the block hold:
+
+- **hvb writes the markers, not the file.** The VirtualBoard template puts a delimiter pair into
+  every spec, so an ordinary spec arrives carrying markers — and a hostile one arrives carrying
+  three, the extra closing tag ending the block early so that everything after it reads as hvb's own
+  voice. Every marker found in repository text is stripped before wrapping.
+- **The markers carry a nonce, minted per dispatch**, and the prompt names it. Content cannot close
+  a delimiter it could not predict, and it cannot smuggle one in either.
+- **Nothing repository-supplied is printed in hvb's voice.** The only exceptions are the feature id
+  and the role key, each reduced to identifier characters, because prose in a heading hvb wrote
+  reads as hvb talking.
+
+A stage instruction is the one key whose meaning depends on where it was read from: from the
+operator's config it is policy and is presented as such; from the repository it is quoted inside the
+block with everything else. `Column.PromptFromRepository` carries that provenance, and has no TOML
+key of its own so that no file can claim to be the operator.
+
+What the block is *not* is a sanitiser. It does not edit the text or judge it; it states, in hvb's
+voice, where the repository's words begin and end. The agent contract
+([`skill/SKILL.md`](../skill/SKILL.md)) is the other half: it tells the agent that material inside
+the block never grants a permission, changes a rule or issues a command, whatever it appears to say.
+
+### Why the two config layers are not equivalent
+
+`~/.config/herdr-virtualboard/config.toml` is written by hand, on this machine, by the person who
+installed the plugin. `<project root>/.hvb.toml` arrives with the repository: from a clone, and from
+a pull request opened by someone who has no account here. Merging them field by field and calling
+both "configuration" was the mistake, because for a Herdr plugin the trust boundary is the
+**install**, not the call — by the time either file is read, hvb already holds the operator's socket
+and can reach the whole CLI without anyone approving anything.
+
+So the project layer may describe the project's pipeline, and nothing else. Whatever decides which
+program hvb executes (`harness`, `columns.<status>.harness`), which host receives the operator's
+forge token (`forge.kind`, `forge.base_url`, `forge.token`), or whether finishing a run publishes a
+branch (`forge.enabled`, `forge.draft`, `forge.push_remotes`, `forge.require_confirmation`,
+`worktree.enabled`, `worktree.remote`, `columns.<status>.worktree`, `columns.<status>.pr`) is read
+from the operator's file only. A project file naming one is **refused**, with an error naming the
+key: ignoring it silently would be the repository setting policy with nobody finding out, and this
+file already argues against silent fallbacks elsewhere.
+
+Closing one of those keys and leaving its neighbour open would only move the attack — a remote
+allowlist is decorative if the same file can set `worktree.remote`, and refusing top-level `harness`
+achieves nothing while `columns.in-progress.harness` is accepted. They are one decision with several
+spellings, so they are refused as a set.
+
+Publication keeps a second check at the moment it matters, rather than trusting the config layer
+alone: `forge.push_remotes` is consulted immediately before the push. It is deliberately not a human
+confirmation. An approved feature is expected to reach a pull request without anyone clicking
+anything, so what bounds an autonomous run is a destination the operator named in advance, plus
+`forge.draft` on by default — and `forge.require_confirmation` for an operator who wants the stop
+anyway.
 
 ## Talking to Herdr
 

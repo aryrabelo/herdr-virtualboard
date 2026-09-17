@@ -26,7 +26,11 @@ func newTUICommand(app *App) *cobra.Command {
 
 Columns are the VirtualBoard lifecycle: backlog, in-progress, blocked, review,
 done. Cards are feature specs. Moving a card runs vb, so the repository and the
-board can never disagree; pressing d dispatches a role agent into a Herdr pane.`,
+board can never disagree; pressing d dispatches a role agent into a Herdr pane.
+
+This board reads VirtualBoard spec markdown only. For the owner's own queue —
+FIOS.md threads, the gates/ ledgers and this week's pull requests — use
+"hvb queue", which needs neither a .virtualboard directory nor the vb binary.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := contextFor(cmd)
@@ -66,10 +70,19 @@ board can never disagree; pressing d dispatches a role agent into a Herdr pane.`
 			ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
 			defer stop()
 
+			// A resolved workspace holding no specs draws five empty
+			// columns, which is indistinguishable from a board that
+			// failed to read anything — measured in ~/vault/MyWikiVault,
+			// whose .virtualboard/ belongs to unrelated tooling and holds
+			// zero feature specs. The board says so now, and says where
+			// the owner's real queue lives, because `hvb tui` and
+			// `hvb queue` read different worlds and nothing on this
+			// screen would otherwise mention the other one.
 			return tui.Run(ctx, backend, tui.Options{
 				Refresh:   refresh,
 				Colour:    colour,
 				PaneTitle: app.paneTitle(ctx),
+				EmptyHint: "no feature specs here; `hvb queue --vault DIR --repo OWNER/NAME` reads the owner's queue",
 			})
 		},
 	}

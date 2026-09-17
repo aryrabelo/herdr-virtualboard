@@ -13,12 +13,41 @@ Two layers, merged **field by field**, later winning:
 | `<project root>/.hvb.toml` | this project |
 
 Field-by-field means a project file naming one column does not erase the rest of the pipeline, and a
-project file setting `harness` does not reset your global `role`.
+project file setting `role` does not reset your global `owner`.
+
+The two layers are **not** equivalent. The global file is yours, written by hand on this machine. The
+project file arrives with the repository — from a clone, and from a pull request opened by someone
+with no account here — so it may not set what a repository has no business deciding.
 
 The project file sits **beside** `.virtualboard/`, not inside it, because `vb init --update`
 re-applies the upstream template over that directory and would overwrite anything hvb left there.
 
 An unknown key is an error rather than a silent no-op, so a typo is reported when you save the file.
+
+## Operator-only keys
+
+These may only be set in the global config. A `.hvb.toml` that names one is **refused**, with an
+error naming the key and the path of your own config — silence here would be the repository choosing
+policy and nobody finding out.
+
+| Key | Why it is yours |
+|---|---|
+| `harness`, `columns.<status>.harness` | it is the program hvb starts, with your credentials |
+| `forge.kind`, `forge.base_url`, `forge.token` | together they decide which host receives an authenticated API call, so a repository able to set them could redirect your forge token to a host it chose |
+| `forge.enabled`, `columns.<status>.pr` | they turn an ordinary dispatch into a push and a pull request |
+| `forge.draft` | a draft is the safe default; a repository must not be able to clear it |
+| `forge.push_remotes`, `forge.require_confirmation` | they *are* the publication policy |
+| `worktree.enabled`, `columns.<status>.worktree` | they decide whether a dispatch gets a branch at all, which is what a pull request is opened from |
+| `worktree.remote` | it names the destination a finished branch is published to |
+
+A project file may still describe its own pipeline: `role`, `owner`, the timeouts, `placement`,
+`worktree.branch`, `worktree.base`, and per column `auto`, `role`, `prompt`, `on_success`,
+`on_failure` and `timeout`.
+
+`columns.<status>.prompt` is accepted from a project file, but it is not treated as your policy. A
+stage instruction hvb reads out of the repository is quoted to the agent as repository material,
+inside the delimited block with the spec — see [`design.md`](design.md). The same key in your global
+config is presented as policy, in hvb's own voice.
 
 ## Top level
 
@@ -106,6 +135,8 @@ auto = true
 | `HERDR_BIN_PATH` | the host executable to use (default `bora`); the host injects this into panes it manages |
 | `HVB_MIN_HERDR_VERSION` | lower or raise the host version floor (default `0.9.0`) |
 | `HVB_MIN_HERDR_PROTOCOL` | lower or raise the socket protocol floor (default `25`; use `22` for upstream Herdr 0.9.0) |
+| `HVB_FORGE_TOKEN` | the Forgejo/Gitea token, when you would rather not write it into a file |
+| `HVB_TRUST_REPOSITORY` | set to `1`, `true`, `yes` or `on` to let hvb pass `--trust-repository` on worktree commands. Unset, hvb leaves the host's own repository-trust gate alone rather than answering it for you |
 | `HVB_CLI_INSTALL_DIR` | where `scripts/install-cli.sh` puts `hvb` (default `~/.local/bin`) |
 | `NO_COLOR` | draw the board without colour |
 

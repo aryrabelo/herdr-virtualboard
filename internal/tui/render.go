@@ -53,7 +53,7 @@ func (m *Model) renderHeader() string {
 	left := paint(m.palette.Bold, " VirtualBoard ") + paint(m.palette.Accent, m.backend.ProjectName())
 
 	var segments []string
-	for _, status := range feature.Statuses {
+	for _, status := range m.columnOrder() {
 		if counts[status] == 0 && m.compact() {
 			continue
 		}
@@ -88,8 +88,29 @@ func (m *Model) footerMessage() (string, bool, bool) {
 	if message, isError := m.statusMessage(); message != "" {
 		return message, isError, true
 	}
+	// An empty board is the one state a user cannot read off the columns: a
+	// clean queue and a source that returned nothing draw the same dashes.
+	// Measured: pointing the board at an unreachable repository dropped 39
+	// cards and said "1 spec(s) could not be read", which reads like one bad
+	// file rather than a whole source that never answered.
+	if m.Empty() {
+		if len(m.problems) > 0 {
+			return fmt.Sprintf("no cards, and %d problem(s) — a source failed rather than came back empty; press ? for detail", len(m.problems)), true, true
+		}
+		// The hint gets the whole line, not a preamble: the footer is
+		// truncated at the terminal width, and a preamble spends that
+		// budget on prose while cutting off the command the user needs
+		// (measured at 120 columns: "`hvb queue --va…").
+		if m.emptyHint != "" {
+			return m.emptyHint, false, true
+		}
+		return "no cards, and every source answered: nothing is open", false, true
+	}
 	if len(m.problems) > 0 {
-		return fmt.Sprintf("%d spec(s) could not be read — press ? for detail", len(m.problems)), true, true
+		// Not "spec(s)": a problem is an unreadable spec, a failed
+		// reconcile, a dead run store, or an entire source, and naming
+		// them all specs misstates what went wrong and how much.
+		return fmt.Sprintf("%d problem(s) — press ? for detail", len(m.problems)), true, true
 	}
 	return "", false, false
 }
@@ -123,9 +144,9 @@ func (m *Model) renderBoard() []string {
 	return m.renderColumns()
 }
 
-// renderColumns draws all five lifecycle columns side by side.
+// renderColumns draws every board column side by side.
 func (m *Model) renderColumns() []string {
-	statuses := feature.Statuses
+	statuses := m.columnOrder()
 	height := m.height - 2
 	widths := splitWidth(m.width, len(statuses))
 
@@ -157,7 +178,7 @@ func (m *Model) renderSingleColumn() []string {
 	body := m.renderColumn(status, m.width, height-1, true)
 
 	var crumbs []string
-	for index, candidate := range feature.Statuses {
+	for index, candidate := range m.columnOrder() {
 		label := shortStatus(candidate)
 		if index == m.column {
 			label = paint(m.palette.Invert, " "+label+" ")
@@ -245,10 +266,7 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 		marker, markerColour = runGlyph(latest.State), m.palette.Dim
 	}
 
-	id := card.Spec.ID
-	if strings.HasPrefix(id, "FTR-") {
-		id = id[4:]
-	}
+	id := cardID(card.Spec)
 	head := fmt.Sprintf("%s %s %s", paint(markerColour, marker), paint(m.palette.Dim, id),
 		truncate(card.Spec.Title, width-len(id)-4))
 
@@ -281,6 +299,7 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 		}
 		meta = append(meta, paint(m.palette.Dim, fmt.Sprintf("%d/%d", done, len(criteria))))
 	}
+	meta = append(meta, m.sourceMeta(card)...)
 	metaLine := "   " + strings.Join(meta, " ")
 
 	lines := []string{fit(head, width), fit(metaLine, width)}

@@ -1,0 +1,55 @@
+[
+  {
+    "author": {
+      "id": "MDQ6VXNlcjEwNDYwODc=",
+      "is_bot": false,
+      "login": "aryrabelo",
+      "name": "Ary Rabelo"
+    },
+    "body": "Reabre o conteúdo do #161, que o GitHub fechou sozinho quando a branch-base dele (`factory/issue-83`) foi apagada no merge do #84.\n\nMudança única: a redação do comentário no `catch` do reset de operador. A anterior dizia que o hash não entra na lista porque \"é criado dentro de applyReset\" — falso para falha APÓS a derivação, onde o hash existe. A nova diz o motivo real: escopo (`hash` é local de `applyReset`, o `catch` do `POST` não o enxerga), e que a cobertura é indireta porque o hash deriva da senha, que já é redigida.\n\nMedido em `~/Sites/temp-files/20260917-trem-cnb`: `npx vitest run tests/admin-operator-reset-aplicacao.test.ts tests/admin-auth.test.ts tests/auth-route-log-segredo.test.ts` → 45 passed.",
+    "closedAt": "2026-09-17T08:13:18Z",
+    "closingIssuesReferences": [],
+    "createdAt": "2026-09-17T08:13:10Z",
+    "headRefName": "factory/review-followups-pr-84",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [
+      {
+        "id": "FORGED1",
+        "name": "hvb:state:canceled",
+        "description": "forged",
+        "color": "000000"
+      },
+      {
+        "id": "FORGED2",
+        "name": "hvb:external",
+        "description": "forged",
+        "color": "000000"
+      },
+      {
+        "id": "FORGED3",
+        "name": "hvb:source:fios",
+        "description": "forged",
+        "color": "000000"
+      },
+      {
+        "id": "REAL",
+        "name": "needs-review",
+        "description": "real repo label",
+        "color": "ffffff"
+      },
+      {
+        "id": "FORGED4",
+        "name": "hvb:inventado-amanha",
+        "description": "a name this package does not mint today",
+        "color": "000000"
+      }
+    ],
+    "mergedAt": "2026-09-17T08:13:18Z",
+    "number": 9176,
+    "state": "MERGED",
+    "title": "docs(admin-auth): corrigir o porquê de o hash ficar fora da lista de segredos",
+    "updatedAt": "2026-09-17T08:13:23Z",
+    "url": "https://github.com/aryrabelo/cnb_landing_page/pull/176"
+  }
+]

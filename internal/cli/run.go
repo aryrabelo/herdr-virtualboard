@@ -481,9 +481,21 @@ discards it.`,
 
 // resolveRun finds the run a command should act on: an explicit id, else
 // $HVB_RUN_ID (what a dispatched agent has), else the newest active run.
+//
+// An explicit id that disagrees with $HVB_RUN_ID is refused. The contract hvb
+// embeds in every prompt tells the agent to report with a bare `hvb run done`,
+// and $HVB_RUN_ID is how hvb knows which run that is — so a command naming a
+// different run from inside a dispatched pane is not the operator addressing
+// their own board. It is one run reaching for another, which would let it close
+// a sibling as succeeded, move that feature on, or publish its branch.
 func resolveRun(app *App, args []string) (*runs.Run, error) {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
-		return app.Store().Get(strings.TrimSpace(args[0]))
+		id := strings.TrimSpace(args[0])
+		if self := os.Getenv("HVB_RUN_ID"); self != "" && self != id {
+			return nil, Usage("this pane belongs to run %s, so it cannot act on %s "+
+				"(report your own run with a bare `hvb run done`)", self, id)
+		}
+		return app.Store().Get(id)
 	}
 	if id := os.Getenv("HVB_RUN_ID"); id != "" {
 		return app.Store().Get(id)

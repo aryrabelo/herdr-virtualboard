@@ -74,6 +74,13 @@ type Worktree struct {
 }
 
 // Forge configures pull-request creation.
+//
+// Every field here belongs to the operator, never to a repository: Load
+// refuses a project `.hvb.toml` that sets one. Kind, BaseURL and Token
+// together decide which host receives an authenticated API call, so a
+// repository able to set them could redirect the operator's forge token to a
+// host of its choosing — and a `.hvb.toml` travels with the repository,
+// including from a pull request opened by someone with no account here.
 type Forge struct {
 	// Enabled opens a pull request when a worktree run succeeds.
 	Enabled bool `toml:"enabled"`
@@ -89,6 +96,18 @@ type Forge struct {
 	Token string `toml:"token"`
 	// BaseURL overrides the API root derived from the remote host.
 	BaseURL string `toml:"base_url"`
+	// PushRemotes are the git remotes hvb may publish a finished branch to.
+	// The default names `origin` alone: a push is the moment an agent's work
+	// leaves this machine, and which remote it leaves through is the
+	// operator's decision rather than the board's. An empty list forbids
+	// pushing outright.
+	PushRemotes []string `toml:"push_remotes"`
+	// RequireConfirmation stops hvb short of pushing and opening the pull
+	// request, leaving both to the operator. Off by default, deliberately:
+	// a feature that was approved into the pipeline is expected to reach a
+	// pull request without anyone clicking anything, which is the point of
+	// dispatching it in the first place.
+	RequireConfirmation bool `toml:"require_confirmation"`
 }
 
 // ResolveToken returns the forge token, preferring configuration then the
@@ -99,6 +118,16 @@ func (f Forge) ResolveToken() string {
 		return f.Token
 	}
 	return os.Getenv("HVB_FORGE_TOKEN")
+}
+
+// AllowsRemote reports whether the operator permits pushing to a remote.
+func (f Forge) AllowsRemote(name string) bool {
+	for _, allowed := range f.PushRemotes {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Column is the policy for one lifecycle status.
@@ -114,6 +143,11 @@ type Column struct {
 	// Prompt is prepended to the dispatch prompt, the way a herdr-board
 	// column's system prompt is.
 	Prompt string `toml:"prompt"`
+	// PromptFromRepository records that Prompt came out of the project's
+	// own `.hvb.toml` rather than the operator's config. A repository
+	// cannot set this — the field has no TOML key — and dispatch presents
+	// such a prompt as repository material instead of as harness policy.
+	PromptFromRepository bool `toml:"-"`
 	// OnSuccess and OnFailure are the statuses a finished run moves the
 	// feature to. Both must be legal VirtualBoard transitions from this
 	// status; Validate rejects anything else rather than letting a dispatch
@@ -177,7 +211,7 @@ func Default() Config {
 		PromptTimeout:  Duration(10 * time.Minute),
 		Placement:      "overlay",
 		Worktree:       Worktree{Branch: git.BranchTemplate, Remote: "origin"},
-		Forge:          Forge{Draft: true},
+		Forge:          Forge{Draft: true, PushRemotes: []string{"origin"}},
 		Columns: map[string]Column{
 			string(feature.Backlog): {},
 			string(feature.InProgress): {
@@ -209,17 +243,29 @@ func (c *Config) Column(status feature.Status) Column {
 
 // Load resolves the global and project config over the defaults. A missing file
 // at either layer is normal and contributes nothing.
+//
+// The two layers are not equivalent, and the difference is a security boundary
+// rather than a convenience: the global file is the operator's, written by hand
+// on this machine, while the project file arrives with the repository. A
+// project file may therefore only set what a repository is allowed to decide;
+// see operatorOnlyKeys.
 func Load(projectRoot string) (*Config, error) {
 	resolved := Default()
 	globalPath, err := GlobalPath()
 	if err != nil {
 		return nil, err
 	}
-	for _, path := range []string{globalPath, filepath.Join(projectRoot, ProjectFile)} {
-		if path == "" {
+	for _, layer := range []struct {
+		path    string
+		project bool
+	}{
+		{path: globalPath},
+		{path: filepath.Join(projectRoot, ProjectFile), project: true},
+	} {
+		if layer.path == "" {
 			continue
 		}
-		if err := mergeFile(&resolved, path); err != nil {
+		if err := mergeFile(&resolved, layer.path, layer.project); err != nil {
 			return nil, err
 		}
 	}
@@ -245,10 +291,69 @@ func GlobalPath() (string, error) {
 	return filepath.Join(home, ".config", "herdr-virtualboard", "config.toml"), nil
 }
 
+// operatorOnlyKeys are the settings only the operator's own config may set.
+//
+// Each one decides what hvb executes, who it authenticates to, or whether an
+// ordinary dispatch turns into a push: the harness is a program hvb starts with
+// the operator's credentials, the forge keys pick the host that receives their
+// token, and worktree.remote names the destination a finished branch is
+// published to. A `.hvb.toml` is repository content — it arrives with a clone
+// and with every pull request — and for a Herdr plugin the trust boundary is
+// the install, not the call: by the time this file is read, hvb already holds
+// the operator's socket. A project file naming one of these is refused rather
+// than ignored, because the operator should find out that the repository tried.
+var operatorOnlyKeys = []string{
+	"harness",
+	"worktree.enabled",
+	"worktree.remote",
+	"forge.enabled",
+	"forge.draft",
+	"forge.kind",
+	"forge.token",
+	"forge.base_url",
+	"forge.push_remotes",
+	"forge.require_confirmation",
+}
+
+// operatorOnlyColumnKeys are the per-column settings a project file may not
+// set. They are the same three decisions one level down: which program runs,
+// whether it runs in a worktree, and whether finishing publishes a branch. A
+// list that stopped at the top-level keys would leave this door open.
+var operatorOnlyColumnKeys = []string{"harness", "worktree", "pr"}
+
+// refuseOperatorKeys rejects a project file that reaches for operator policy.
+func refuseOperatorKeys(path string, meta toml.MetaData, overlay *Config) error {
+	for _, key := range operatorOnlyKeys {
+		if meta.IsDefined(strings.Split(key, ".")...) {
+			return operatorKeyError(path, key)
+		}
+	}
+	for name := range overlay.Columns {
+		for _, key := range operatorOnlyColumnKeys {
+			if meta.IsDefined("columns", name, key) {
+				return operatorKeyError(path, fmt.Sprintf("columns.%s.%s", name, key))
+			}
+		}
+	}
+	return nil
+}
+
+func operatorKeyError(path, key string) error {
+	global, err := GlobalPath()
+	if err != nil || global == "" {
+		global = "the hvb global config"
+	}
+	return fmt.Errorf("%s: %s may only be set in the operator's config (%s), not in a repository file",
+		path, key, global)
+}
+
 // mergeFile overlays one TOML file onto cfg. Only the keys the file actually
 // sets are applied, so a project file that names one column does not erase the
 // rest of the pipeline.
-func mergeFile(cfg *Config, path string) error {
+//
+// project marks the repository-supplied layer: it is refused the operator-only
+// keys, and a column prompt it sets is remembered as repository material.
+func mergeFile(cfg *Config, path string, project bool) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -263,6 +368,11 @@ func mergeFile(cfg *Config, path string) error {
 	}
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		return fmt.Errorf("parse %s: unknown key %q", path, undecoded[0].String())
+	}
+	if project {
+		if err := refuseOperatorKeys(path, meta, &overlay); err != nil {
+			return err
+		}
 	}
 
 	if meta.IsDefined("harness") {
@@ -299,6 +409,8 @@ func mergeFile(cfg *Config, path string) error {
 		{"forge.kind", func() { cfg.Forge.Kind = overlay.Forge.Kind }},
 		{"forge.token", func() { cfg.Forge.Token = overlay.Forge.Token }},
 		{"forge.base_url", func() { cfg.Forge.BaseURL = overlay.Forge.BaseURL }},
+		{"forge.push_remotes", func() { cfg.Forge.PushRemotes = overlay.Forge.PushRemotes }},
+		{"forge.require_confirmation", func() { cfg.Forge.RequireConfirmation = overlay.Forge.RequireConfirmation }},
 	} {
 		if meta.IsDefined(strings.Split(field.key, ".")...) {
 			field.apply()
@@ -317,6 +429,11 @@ func mergeFile(cfg *Config, path string) error {
 		}
 		if meta.IsDefined("columns", name, "prompt") {
 			base.Prompt = column.Prompt
+			// Provenance is derived from the layer being merged, never
+			// accumulated: a prompt the operator set and a project file
+			// left alone stays operator policy, and a project file that
+			// overrides it makes the whole prompt repository material.
+			base.PromptFromRepository = project
 		}
 		if meta.IsDefined("columns", name, "on_success") {
 			base.OnSuccess = column.OnSuccess

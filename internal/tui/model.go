@@ -77,6 +77,11 @@ type Model struct {
 	status   string
 	statusAt time.Time
 	isError  bool
+	// emptyHint is what the caller wants said when the board holds nothing.
+	// A blank board is ambiguous — a clean queue and a source that produced
+	// nothing look identical — and only the command that opened it knows
+	// where the work would otherwise live.
+	emptyHint string
 
 	detailScroll  int
 	detailSection int
@@ -135,7 +140,7 @@ func (m *Model) Reload(ctx context.Context) {
 				break
 			}
 		}
-		columns[spec.Status] = append(columns[spec.Status], card)
+		columns[boardStatus(spec)] = append(columns[boardStatus(spec)], card)
 	}
 	m.columns = columns
 	first := m.lastLoad.IsZero()
@@ -156,7 +161,7 @@ func (m *Model) Reload(ctx context.Context) {
 // focusFirstPopulatedColumn moves the selection to the leftmost column that has
 // cards, leaving it alone when the board is empty.
 func (m *Model) focusFirstPopulatedColumn() {
-	for index, status := range feature.Statuses {
+	for index, status := range m.columnOrder() {
 		if len(m.columns[status]) > 0 {
 			m.column = index
 			return
@@ -166,7 +171,7 @@ func (m *Model) focusFirstPopulatedColumn() {
 
 // focusFeature moves the selection to a feature wherever it now lives.
 func (m *Model) focusFeature(id string) bool {
-	for columnIndex, status := range feature.Statuses {
+	for columnIndex, status := range m.columnOrder() {
 		for cardIndex, card := range m.columns[status] {
 			if card.Spec.ID == id {
 				m.column = columnIndex
@@ -183,10 +188,11 @@ func (m *Model) clampSelection() {
 	if m.column < 0 {
 		m.column = 0
 	}
-	if m.column >= len(feature.Statuses) {
-		m.column = len(feature.Statuses) - 1
+	order := m.columnOrder()
+	if m.column >= len(order) {
+		m.column = len(order) - 1
 	}
-	for _, status := range feature.Statuses {
+	for _, status := range order {
 		count := len(m.columns[status])
 		index := m.card[status]
 		switch {
@@ -202,10 +208,11 @@ func (m *Model) clampSelection() {
 
 // FocusedStatus is the status of the focused column.
 func (m *Model) FocusedStatus() feature.Status {
-	if m.column < 0 || m.column >= len(feature.Statuses) {
+	order := m.columnOrder()
+	if m.column < 0 || m.column >= len(order) {
 		return feature.Backlog
 	}
-	return feature.Statuses[m.column]
+	return order[m.column]
 }
 
 // FocusedCard is the selected card, or nil when the column is empty.
@@ -225,16 +232,31 @@ func (m *Model) Cards(status feature.Status) []*Card { return m.columns[status] 
 // Counts returns the number of cards per status.
 func (m *Model) Counts() map[feature.Status]int {
 	out := map[feature.Status]int{}
-	for _, status := range feature.Statuses {
+	for _, status := range m.columnOrder() {
 		out[status] = len(m.columns[status])
 	}
 	return out
 }
 
+// Empty reports whether a completed load produced no cards at all. It is
+// false before the first load: a board that has not read anything yet has not
+// found nothing, and saying so would be the same lie in the other direction.
+func (m *Model) Empty() bool {
+	if m.lastLoad.IsZero() {
+		return false
+	}
+	for _, status := range m.columnOrder() {
+		if len(m.columns[status]) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // ActiveRunCount is how many runs currently hold a pane.
 func (m *Model) ActiveRunCount() int {
 	count := 0
-	for _, status := range feature.Statuses {
+	for _, status := range m.columnOrder() {
 		for _, card := range m.columns[status] {
 			if card.Active != nil {
 				count++

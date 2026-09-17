@@ -221,8 +221,8 @@ func (m *Model) moveColumn(delta int) {
 	if m.column < 0 {
 		m.column = 0
 	}
-	if m.column >= len(feature.Statuses) {
-		m.column = len(feature.Statuses) - 1
+	if order := m.columnOrder(); m.column >= len(order) {
+		m.column = len(order) - 1
 	}
 }
 

@@ -30,6 +30,7 @@ pane is running which feature.`,
 
 	root.AddCommand(
 		newTUICommand(app),
+		newQueueCommand(app),
 		newFeatureCommand(app),
 		newRunCommand(app),
 		newRoleCommand(app),

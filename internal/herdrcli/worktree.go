@@ -3,7 +3,31 @@ package herdrcli
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 )
+
+// TrustRepositoryEnv is the operator's opt-in to skipping Herdr's own
+// repository-trust gate for worktree operations.
+const TrustRepositoryEnv = "HVB_TRUST_REPOSITORY"
+
+// trustFlags returns `--trust-repository` only when the operator asked for it.
+//
+// Herdr gates worktree operations behind its own repository-trust check.
+// Passing the flag unconditionally answered that check on the operator's
+// behalf, silently, for every repository hvb was ever pointed at — the same
+// class of decision the README is proud of never taking with a harness's own
+// trust dialog. The gate is the operator's to open, so hvb only skips it when
+// the operator says so, in their own environment, which a repository cannot
+// write to.
+func trustFlags() []string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(TrustRepositoryEnv))) {
+	case "1", "true", "yes", "on":
+		return []string{"--trust-repository"}
+	default:
+		return nil
+	}
+}
 
 // Worktree is one entry of `herdr worktree list`.
 type Worktree struct {
@@ -46,7 +70,7 @@ type CreatedWorktree struct {
 
 // Worktrees lists the worktrees of the repository containing cwd.
 func (c *Client) Worktrees(ctx context.Context, cwd string) ([]Worktree, *WorktreeSource, error) {
-	args := []string{"worktree", "list", "--cwd", cwd, "--trust-repository"}
+	args := append([]string{"worktree", "list", "--cwd", cwd}, trustFlags()...)
 	var result struct {
 		Worktrees []Worktree     `json:"worktrees"`
 		Source    WorktreeSource `json:"source"`
@@ -63,9 +87,9 @@ func (c *Client) Worktrees(ctx context.Context, cwd string) ([]Worktree, *Worktr
 // workspace: it produces a workspace the sidebar groups under the parent
 // repository, which is exactly how a user expects a feature branch to appear.
 //
-// --trust-repository is required for worktree operations and is passed here
-// because hvb only ever acts on a repository the user already opened as a
-// VirtualBoard workspace.
+// Herdr's repository-trust gate is left alone unless the operator opted out of
+// it with $HVB_TRUST_REPOSITORY: whether a directory is trusted is their call,
+// not the board's.
 func (c *Client) CreateWorktree(ctx context.Context, cwd, branch, base, label string, focus bool) (*CreatedWorktree, error) {
 	args := []string{"worktree", "create", "--cwd", cwd, "--branch", branch}
 	if base != "" {
@@ -74,7 +98,8 @@ func (c *Client) CreateWorktree(ctx context.Context, cwd, branch, base, label st
 	if label != "" {
 		args = append(args, "--label", label)
 	}
-	args = append(args, focusFlag(focus), "--trust-repository")
+	args = append(args, focusFlag(focus))
+	args = append(args, trustFlags()...)
 
 	var result CreatedWorktree
 	if err := c.call(ctx, &result, args...); err != nil {
@@ -100,7 +125,8 @@ func (c *Client) OpenWorktree(ctx context.Context, cwd, branch, path, label stri
 	if label != "" {
 		args = append(args, "--label", label)
 	}
-	args = append(args, focusFlag(focus), "--trust-repository")
+	args = append(args, focusFlag(focus))
+	args = append(args, trustFlags()...)
 
 	var result CreatedWorktree
 	if err := c.call(ctx, &result, args...); err != nil {
@@ -119,7 +145,7 @@ func (c *Client) RemoveWorktree(ctx context.Context, workspaceID string, force b
 	if force {
 		args = append(args, "--force")
 	}
-	args = append(args, "--trust-repository")
+	args = append(args, trustFlags()...)
 	err := c.call(ctx, nil, args...)
 	if err != nil && isNotFound(err) {
 		return nil

@@ -22,6 +22,10 @@ type Options struct {
 	// PaneTitle, when set, is reported to Herdr so the plugin pane's border
 	// names the project rather than the binary.
 	PaneTitle func(title string)
+	// EmptyHint is shown when the board holds no cards. The board cannot
+	// word this itself: only the command knows which world it opened and
+	// what the user would have to run to see the other one.
+	EmptyHint string
 }
 
 // DefaultRefresh is the background reload interval. It is slow enough not to
@@ -44,6 +48,7 @@ func Run(ctx context.Context, backend Backend, opts Options) error {
 	defer screen.Close()
 
 	model := NewModel(backend, NewPalette(opts.Colour && term.IsTerminal(int(os.Stdout.Fd()))))
+	model.emptyHint = opts.EmptyHint
 	width, height := screen.Size()
 	model.Resize(width, height)
 	model.Reload(ctx)

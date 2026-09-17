@@ -115,8 +115,20 @@ func (a *App) Config() *config.Config { return a.config }
 // VB returns the vb client.
 func (a *App) VB() *vb.Client { return a.vb }
 
-// Herdr returns the herdr client.
-func (a *App) Herdr() *herdrcli.Client { return a.herdr }
+// Herdr returns the herdr client, building it on demand.
+//
+// Resolve sets it up along with everything else a workspace command needs, but
+// `hvb queue` has no workspace to resolve and still talks to Herdr to relabel
+// its own pane. Returning the nil field here panicked the moment the board
+// started inside a Herdr pane.
+func (a *App) Herdr() *herdrcli.Client {
+	if a.herdr == nil {
+		client := herdrcli.New()
+		client.Session = a.Session
+		a.herdr = client
+	}
+	return a.herdr
+}
 
 // Store returns the run store.
 func (a *App) Store() *runs.Store { return a.store }

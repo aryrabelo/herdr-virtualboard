@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"golang.org/x/term"
-
-	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // Options configure the event loop.
@@ -56,7 +54,10 @@ func Run(ctx context.Context, backend Backend, opts Options) error {
 
 	model := NewModel(backend, NewPalette(opts.Colour && term.IsTerminal(int(os.Stdout.Fd()))))
 	model.emptyHint = opts.EmptyHint
-	model.focusColumn = feature.Status(opts.FocusColumn)
+	// The raw request: the model resolves it through the workflow's own
+	// parser, which is what makes `ready_to_review` open the column
+	// `ready-to-review` rather than falling back to wherever the work is.
+	model.focusColumn = opts.FocusColumn
 	width, height := screen.Size()
 	model.Resize(width, height)
 	model.Reload(ctx)

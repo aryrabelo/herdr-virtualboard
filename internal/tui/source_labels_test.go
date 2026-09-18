@@ -97,6 +97,10 @@ func TestThePolicyAndTheSourcesSpellTheSameFacts(t *testing.T) {
 		{"state:open", linha.LabelStateOpen, ghboard.LabelOpen},
 		{"check:red", linha.LabelCheckRed, ghboard.LabelCheckRed},
 		{"activity:", linha.LabelActivityPrefix, ghboard.LabelActivityPrefix},
+		// The quiet timer advances on a MEASURED success, so the policy
+		// and the source have to agree on what green is spelled — an
+		// absent label is not a green one.
+		{"check:green", linha.LabelCheckGreen, ghboard.LabelCheckGreen},
 		// The issue source and the pull-request source both report an open
 		// item, and the column claiming `hvb:state:open` is the one the
 		// quiet timer applies to. Two spellings would mean an open issue

@@ -21,6 +21,10 @@ type Workspace struct {
 	Focused     bool   `json:"focused"`
 	TabCount    int    `json:"tab_count"`
 	PaneCount   int    `json:"pane_count"`
+	// VisualGroup is the sidebar group holding the workspace, empty when it
+	// sits at the top level. Herdr reports the member as JSON null in that
+	// case, which decodes into the zero string.
+	VisualGroup string `json:"visual_group"`
 	// Worktree is present only when the workspace is a linked worktree
 	// checkout rather than an ordinary directory.
 	Worktree *WorktreeWorkspace `json:"worktree,omitempty"`
@@ -170,6 +174,21 @@ func (c *Client) CreateWorkspace(ctx context.Context, cwd, label string, env map
 		return nil, nil, nil, err
 	}
 	return &result.Workspace, &result.Tab, &result.RootPane, nil
+}
+
+// SetWorkspaceGroup files a workspace under a sidebar group, creating the
+// group when no workspace is in it yet. An empty group takes the workspace
+// out of one, which is what the host does when the name is omitted.
+//
+// Argv verified against the command's own usage on bora 0.48.0:
+// `usage: bora workspace set-group <workspace_id> [name]` — both positional,
+// the name optional. The verb is not listed in `bora workspace --help`.
+func (c *Client) SetWorkspaceGroup(ctx context.Context, workspaceID, group string) error {
+	args := []string{"workspace", "set-group", workspaceID}
+	if group != "" {
+		args = append(args, group)
+	}
+	return c.call(ctx, nil, args...)
 }
 
 // Tabs lists the tabs of a workspace, or of every workspace when empty.

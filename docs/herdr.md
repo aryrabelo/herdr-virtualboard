@@ -55,6 +55,7 @@ fails there rather than at dispatch time.
 bora status
 bora workspace list
 bora workspace create --cwd PATH --label TEXT [--env K=V]... --no-focus
+bora workspace set-group WS [GROUP]
 bora tab list --workspace WS
 bora tab create --workspace WS --cwd PATH --label TEXT [--env K=V]... --no-focus
 bora tab rename TAB LABEL
@@ -90,6 +91,12 @@ These were wrong in the first draft and only surfaced against a live server.
 - **A newly split pane is not an available shell yet.** `agent start` refuses it with
   `agent_pane_busy` until its shell reaches an interactive prompt. hvb retries for up to ten seconds,
   which is safe only because hvb created the pane and nothing else can be using it.
+- **`workspace set-group` is not in `bora workspace --help`.** The verb exists and works; its own
+  usage line (`bora workspace set-group` with no arguments) is the only place it is written down.
+  Both arguments are positional and the group is optional — omitting it takes the workspace out of
+  its group. The group is created on first use.
+- **`visual_group` is `null`, not absent, for an ungrouped workspace.** It decodes into the empty
+  string, so a group is never inferred from a missing member.
 
 ## Lifecycle states
 

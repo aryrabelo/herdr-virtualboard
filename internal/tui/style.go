@@ -35,6 +35,20 @@ type Palette struct {
 	// columns" beside five that are. Indexed by board position, so a
 	// column keeps its colour from frame to frame and neighbours differ.
 	Ramp []string
+	// NeedsAnswer marks a card waiting on the owner's own hands (`hitl`).
+	//
+	// It is deliberately the SAME yellow as Awaiting, and it has its own
+	// name so the choice is recorded where the colours are: the board
+	// already spends 220 on "this run is waiting for an answer", and a
+	// `hitl` card is that same fact one level up — the board waiting on
+	// the human instead of a run waiting on him. Nothing new is spent.
+	//
+	// It is emphatically NOT Failed/Warn (203). That red is already the
+	// colour of a failed run, a cancelled run, and a P0, and painting
+	// "needs an answer" with it would train the eye to read the failure
+	// colour as ordinary board furniture — on this queue, where 6 of 33
+	// cards are `hitl`, it would be the most common red on screen.
+	NeedsAnswer string
 }
 
 // NewPalette chooses a palette for the environment. NO_COLOR and a
@@ -64,6 +78,8 @@ func NewPalette(colour bool) Palette {
 			"\x1b[38;5;110m", "\x1b[38;5;150m", "\x1b[38;5;180m",
 			"\x1b[38;5;139m", "\x1b[38;5;116m",
 		},
+		// Same 220 as Awaiting, on purpose. See the field's comment.
+		NeedsAnswer: "\x1b[38;5;220m",
 	}
 }
 

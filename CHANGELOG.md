@@ -25,6 +25,46 @@ All notable changes to this project are documented here. The format follows
 - **`hvb run cleanup`** removes a finished run's checkout, refusing while work is
   uncommitted unless forced.
 
+### Fixed
+
+- **A dispatched agent lands in its own workspace.** A plain run used to be
+  split into whatever tab the board itself was running in, so dispatching from a
+  board opened in another repository's workspace put the agent there. It now
+  opens a workspace of its own, labelled like its pane (`ftr-0007 · qa`), filed
+  in the same sidebar group as the workspace already hosting the project.
+  Nothing is grouped if the project's workspace is not: an invented group name
+  would add a sidebar folder nobody made.
+- **A long prompt reaches the agent.** The task used to be passed to
+  `bora agent prompt` in argv, where a ~11 KB prompt arrived as a collapsed
+  paste marker — `[Paste #1, +222 lines]` — with the body lost, leaving an agent
+  with no task. hvb now writes the prompt to a file beside the run store and
+  submits a short pointer at it. A dispatch whose prompt cannot be written is
+  refused rather than started blind.
+- **The board answers while it reads.** Reloading ran on the event loop, so a
+  board whose sources take tens of seconds — one measured read of the owner's
+  issue queue took 69 — stopped reading the keyboard and stopped repainting for
+  as long as the read lasted, every refresh. The read now runs off the loop and
+  arrives as just another event, the header says `reading…` while it is out, and
+  a refresh that finds one already in flight is dropped rather than queued. A
+  result that arrives after the board moved on is discarded, never applied late:
+  applying it would visibly undo a move the user already watched succeed.
+- **A focused column is visible when it is empty.** Focus was a bold weight on a
+  title that was already coloured, and an empty column had no card to highlight,
+  so moving onto one looked exactly like not moving. The focused column now
+  carries a `▸` caret and an inverted title, and its empty placeholder carries
+  the caret too. The caret is text, so it survives `NO_COLOR`.
+- **The mouse works.** Clicking a card focuses it, clicking the focused card
+  opens it, and the wheel moves the selection in the column under the pointer.
+  Set `HVB_NO_MOUSE` to keep the terminal's own text selection instead; the
+  error-notice screen never asks for reporting, since its only verb is "press a
+  key" and its text is the thing you want to copy.
+- **`Esc` no longer closes the board.** It sat on the same arm as `q` and quit
+  with no confirmation, which turned every escape sequence the terminal splits
+  after its `ESC` byte into a way to lose the session by accident — a risk mouse
+  reporting multiplies, since a wheel notch emits a sequence. `q` and ctrl-C
+  quit; `Esc` keeps being the cancel in every overlay, and the only cancel in
+  the new-feature form, where `q` types the letter.
+
 ### Notes
 
 - A pull request that cannot be opened — no token, no client for the forge, no

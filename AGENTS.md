@@ -75,6 +75,43 @@ Three rules hold there:
    values and `internal/feature` and `internal/vb` are untouched by it. The column is not a
    catch-all: a done card with a label the board does not know stays in Done.
 
+Four more, learned 2026-09-18 by opening the owner's real queue and watching him use it. Each was
+invisible to the test suite of its day, and each has a test now.
+
+4. **Nothing that runs an external binary belongs on the event loop.** `Model.Reload` did, and the
+   board froze for the length of the read — one measured read of the owner's issue queue took 69s
+   against a 5s tick, so the board was unresponsive most of the time it was open and it read as
+   "slow" rather than as "blocked". A read runs in a goroutine, touches no `Model`, and returns a
+   value the loop applies; every `Model` write stays on the loop, which is why there is no lock.
+   A tick that finds a read in flight is dropped, never queued: queueing a 69s answer behind a 5s
+   tick grows a backlog of answers that are stale on arrival. A result carries the token of the
+   load that asked for it, and is discarded if the board reloaded since — every mutation in
+   `update.go` reloads right after itself, so applying an older read would visibly undo a move the
+   user already watched succeed.
+5. **A focus signal must survive an empty column and `NO_COLOR`.** Focus was `palette.Bold` on a
+   title already coloured by `palette.Status`, and an empty column has no card to invert, so a
+   focused empty column was byte-identical to an unfocused one — the owner found it by pressing
+   left onto an empty Review. The mark is now a text caret plus an inverted title, and the empty
+   placeholder carries the caret too. Test a rendering claim against `Model.Render()` in both
+   palettes; an SGR-only signal is invisible in one of them, and a mark that lives on a card is
+   invisible in a column that has none.
+6. **An escape sequence you do not decode must still be consumed, and `Esc` must not quit.** Legacy
+   X10 mouse reports are not parsed, but their three payload bytes are read and thrown away,
+   because unconsumed they arrive as runes: a click on column 81 is `q`, which quits, and column 82
+   is `r`, which reloads. The mirror of the same hazard is the board's own keymap — `Esc` used to
+   quit with no confirmation, so any read boundary between a sequence's `ESC` byte and its rest
+   closed the board by accident, at whatever rate the terminal fragments writes. Mouse reporting
+   multiplies that rate, since a wheel notch emits a sequence. `q` and ctrl-C quit; `Esc` is the
+   cancel in every overlay and the only cancel in the new-feature form, where `q` types the letter.
+   Prefer closing the hazard at the keymap over a timing heuristic in the reader: `keys.go` decides
+   by buffering rather than by timing, on purpose.
+7. **Asking the terminal for mouse reporting takes its text selection away, so it is a parameter,
+   not a property.** `NewScreen(reportMouse bool)`: the board asks for it because it binds clicks
+   and the wheel; `RunNotice` does not, because its only verb is "press a key" and its text — a
+   `vb init` line — is exactly what a user wants to copy. `HVB_NO_MOUSE` overrides a true for the
+   operator who wants selection back on the board too, and is documented in
+   `docs/configuration.md` like `NO_COLOR`.
+
 ## Changing the agent contract
 
 `skill/SKILL.md` is published and embedded. `internal/dispatch/skill.md` is the embedded copy —
@@ -104,11 +141,13 @@ The surrounding code is the specification. Beyond that:
 - **Degrade rather than refuse.** A missing role charter weakens the prompt; it does not abort a run
   whose agent is already live. A failed `pane rename` is cosmetic. An unreadable run file starts
   clean. But an unsupported Herdr fails closed, because the alternative is an untrackable agent —
-  and so does a `hitl` card, which is the owner's own hands and not an agent's: `roles.Suggest`
-  answers `roles.ErrHumanOnly`, the role picker refuses to open and `dispatch.resolveRole` refuses
-  ahead of `--role` and the column's role. Only `roles.ErrNoCharter` still degrades, to the
-  configured default role. Do not collapse the two back into one answer: that is exactly how the
-  refusal was inert while its unit test stayed green.
+  and so does a `hitl` card, which is the owner's own hands and not an implementer's:
+  `roles.Suggest` answers `roles.ErrHumanOnly`, and `dispatch.resolveRole` routes that card to
+  `config.HumanOnlyRole` (`destravador`, under `config.HumanOnlyHarness` = `omp`) ahead of
+  `--role` and the column's role, while the board's `d` launches it with no picker at all. Missing
+  that charter refuses and says which file to write; it never falls back to an implementer. Only
+  `roles.ErrNoCharter` still degrades, to the configured default role. Do not collapse the two
+  back into one answer: that is exactly how the refusal was inert while its unit test stayed green.
 - **No new dependencies without a strong reason.** The four current ones are cobra, toml, yaml, and
   `x/term`. The TUI is hand-drawn partly to keep it that way.
 

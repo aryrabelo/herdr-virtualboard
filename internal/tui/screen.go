@@ -19,13 +19,17 @@ import (
 // Screen owns the terminal: raw mode, the alternate buffer, and a buffered
 // writer that flushes one complete frame at a time so the board never tears.
 type Screen struct {
-	in       *os.File
-	out      *bufio.Writer
-	restore  *term.State
-	width    int
-	height   int
-	rawMode  bool
-	altebuf  bool
+	in      *os.File
+	out     *bufio.Writer
+	restore *term.State
+	width   int
+	height  int
+	rawMode bool
+	altebuf bool
+	// mouse records that the terminal was asked to report clicks, so Close
+	// can tell "asked and must unask" from "never asked" — including on the
+	// second Close, and on a board the operator opted out of.
+	mouse    bool
 	lastDraw []string
 }
 
@@ -37,7 +41,16 @@ const (
 )
 
 // NewScreen puts the terminal into raw mode on the alternate buffer.
-func NewScreen() (*Screen, error) {
+//
+// reportMouse asks the terminal to report clicks, and is a parameter rather
+// than a property of every screen because reporting takes the terminal's own
+// text selection away for as long as it is up. The board wants that trade: it
+// binds clicks and the scroll wheel. RunNotice does not — its only verb is
+// "press a key", and a notice is exactly the thing a user wants to copy the
+// `vb init` line out of, so it asks for no reporting and keeps selection.
+// HVB_NO_MOUSE still overrides a true, for the operator who wants selection
+// back on the board too.
+func NewScreen(reportMouse bool) (*Screen, error) {
 	in := os.Stdin
 	screen := &Screen{in: in, out: bufio.NewWriterSize(os.Stdout, 1<<16)}
 	if !term.IsTerminal(int(in.Fd())) {
@@ -51,14 +64,33 @@ func NewScreen() (*Screen, error) {
 	screen.Size()
 	screen.write(enterAltScreen + hideCursor + clearScreen)
 	screen.altebuf = true
+	if reportMouse && mouseEnabled() {
+		screen.write(enableMouse)
+		screen.mouse = true
+	}
 	return screen, screen.out.Flush()
 }
 
 // Close restores the terminal. It is safe to call twice, which matters because
 // both the normal exit path and a panic recovery call it.
+//
+// Mouse reporting is turned off here and only here, for the same reason raw
+// mode is: this is the one restore path. Run defers Close immediately after
+// NewScreen, so a normal quit, a cancelled context, a Draw that errors and a
+// panic unwinding through a render all reach it — and the board never
+// suspends itself to run something else, so there is no second place that has
+// to hand the terminal back. A process that exits with mode 1000 still on
+// leaves the user's shell printing `<35;61;12M` every time they move the
+// pointer, which is why this runs before the alternate buffer is released and
+// is flushed on its own.
 func (s *Screen) Close() {
 	if s == nil {
 		return
+	}
+	if s.mouse {
+		s.write(disableMouse)
+		_ = s.out.Flush()
+		s.mouse = false
 	}
 	if s.altebuf {
 		s.write(showCursor + exitAltScreen)

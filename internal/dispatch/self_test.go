@@ -2,6 +2,8 @@ package dispatch
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -58,6 +60,8 @@ func TestBlockedStartupParksTheTaskInsteadOfFailing(t *testing.T) {
   *"tab list"*) echo '{"id":"x","result":{"tabs":[]}}' ;;
   *"tab create"*) echo '{"id":"x","result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' ;;
   *"pane split"*) echo '{"id":"x","result":{"pane":{"pane_id":"w1:p3"}}}' ;;
+  *"workspace create"*) echo '{"id":"x","result":{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1"}}}' ;;
+  *"workspace list"*) echo '{"id":"x","result":{"workspaces":[{"workspace_id":"w1","visual_group":null}]}}' ;;
   *status*) printf 'client:\n  version: 0.48.0\n  protocol: 25\n\nserver:\n  status: running\n  version: 0.48.0\n  socket: /tmp/s\n' ;;
   *) echo '{"id":"x","result":{}}' ;;
 esac`
@@ -77,9 +81,36 @@ esac`
 	if run.PendingPrompt == "" {
 		t.Fatal("the task should be parked for submission once the agent settles")
 	}
-	if !strings.Contains(run.PendingPrompt, "FTR-0001") {
-		t.Error("the parked prompt should be the real task")
+	// What is parked is the pointer, the same string the live path submits,
+	// so the deferred submission cannot reintroduce the collapsed paste.
+	// The task itself is in the file the pointer names.
+	path, found := promptPathIn(run.PendingPrompt)
+	if !found {
+		t.Fatalf("the parked prompt names no prompt file:\n%s", run.PendingPrompt)
 	}
+	if len(run.PendingPrompt) > promptPointerBudget {
+		t.Errorf("the parked prompt is %d bytes, over the %d-byte pointer budget",
+			len(run.PendingPrompt), promptPointerBudget)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the parked prompt points at a file that is not there: %v", err)
+	}
+	if !strings.Contains(string(body), "FTR-0001") {
+		t.Error("the parked prompt should point at the real task")
+	}
+}
+
+// promptPathIn picks the prompt file path out of a pointer prompt, where it
+// sits alone on its own line.
+func promptPathIn(pointer string) (string, bool) {
+	for _, line := range strings.Split(pointer, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, ".md") && filepath.IsAbs(line) {
+			return line, true
+		}
+	}
+	return "", false
 }
 
 // Once the user answers the dialog, the parked task goes in by itself.

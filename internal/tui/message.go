@@ -23,7 +23,7 @@ type Notice struct {
 // board cannot start — no VirtualBoard workspace here, no `vb`, an unsupported
 // Herdr — it has to stay on screen long enough to say so.
 func RunNotice(ctx context.Context, notice Notice, colour bool) error {
-	screen, err := NewScreen()
+	screen, err := NewScreen(false)
 	if err != nil {
 		// No terminal at all: the caller is a script, so the ordinary error
 		// path is the right one.

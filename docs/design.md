@@ -90,17 +90,49 @@ feature, the label hint table, `qa` for anything in review, then the configured 
 The launch is **pane-first**, which is Herdr's documented contract rather than a choice:
 
 1. gate on the compatibility floor (Herdr 0.9.0 / protocol 25 or newer);
-2. find or create the workspace rooted at the project;
-3. find or create the feature's `ftr-####` tab — one per feature, reused across runs, so three
-   dispatches do not leave three tabs;
-4. split a child pane with the project root as cwd and the run's variables in its environment;
-5. `agent start` in **that** child, never the anchor, retrying briefly while the new shell reaches
-   its prompt;
-6. close the anchor, leaving exactly one pane per run;
-7. `agent prompt` with the composed prompt.
+2. write the whole prompt to a file under the run store's `prompts/` directory, and refuse the
+   dispatch if that fails — an agent started without its task is worse than one never started;
+3. open the run **its own workspace**, labelled like its pane (`ftr-0007 · qa`), with the project
+   root as cwd and the run's variables in its environment, and file it in the same sidebar group as
+   the workspace already hosting the project;
+4. `agent start` in that workspace's root pane, retrying briefly while the new shell reaches its
+   prompt;
+5. `agent prompt` with a short pointer at the prompt file — never the prompt itself.
 
-A failed launch keeps the anchor. It is the evidence of what went wrong, and closing it would hide
-the error.
+A worktree run is placed differently, because it already has a workspace: the linked one Herdr
+opened for the checkout. There the run is a pane in the feature's `ftr-####` tab — one tab per
+feature, reused across runs, so three dispatches do not leave three tabs — split off an anchor
+shell that is closed once the agent is up. A failed launch keeps that anchor. It is the evidence of
+what went wrong, and closing it would hide the error.
+
+A run never gets a split off whatever pane the board happens to be running in. That put the harness
+inside the board's own tab, in whatever workspace the board was opened from, which is not where the
+work belongs.
+
+### Why the prompt travels as a path
+
+`bora agent prompt` takes its text in argv, and the host hands it to the harness wrapped in a
+bracketed paste — which the harness may collapse. Measured on a live dispatch, an 11 KB prompt
+arrived as `[Paste #1, +222 lines]`: the line count survived and the body did not, and the agent
+went looking for the content in `local://` and in its session directory before giving up. The pane
+input queue is capped as well, so argv delivery of a prompt that size is fragile for two independent
+reasons.
+
+So the prompt is written to `~/.local/share/herdr-virtualboard/runs/prompts/`, beside the run store,
+and what goes over the terminal is a few hundred bytes naming that file. It is machine-local
+bookkeeping with the same lifetime as the run record, it is still there to read after the pane is
+gone, and it is deliberately not in the repository — a file written there would turn up in the
+agent's own `git status`. A blocked harness parks the same pointer on the run, so the deferred
+submission cannot put the collapsed paste back.
+
+The file is named `prompt-<run>-<digest>.md`, keyed to the run id, so a second dispatch of the same
+card cannot take the prompt away from a live agent still reading it, while a deferred resubmission
+of the same run replaces its own bytes instead of piling up. The readable half of the name is
+reduced to file-name characters because a run id descends from the feature id — on this board a
+GitHub issue's, third-party text that may carry `/` or `..` — and a digest of the raw id is
+appended because that reduction is not injective. `hvb run done` appears in both the file and the
+pointer: the file is authoritative, but the pointer is the only part hvb can be sure reached the
+model, and an agent that never opens the file still has to know how to report.
 
 ### Why the prompt is ordered the way it is
 

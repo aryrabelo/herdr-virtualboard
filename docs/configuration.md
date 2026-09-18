@@ -32,7 +32,7 @@ policy and nobody finding out.
 
 | Key | Why it is yours |
 |---|---|
-| `harness`, `columns.<status>.harness` | it is the program hvb starts, with your credentials |
+| `harness`, `columns.<status>.harness`, `human_only_harness` | it is the program hvb starts, with your credentials |
 | `forge.kind`, `forge.base_url`, `forge.token` | together they decide which host receives an authenticated API call, so a repository able to set them could redirect your forge token to a host it chose |
 | `forge.enabled`, `columns.<status>.pr` | they turn an ordinary dispatch into a push and a pull request |
 | `forge.draft` | a draft is the safe default; a repository must not be able to clear it |
@@ -40,9 +40,9 @@ policy and nobody finding out.
 | `worktree.enabled`, `columns.<status>.worktree` | they decide whether a dispatch gets a branch at all, which is what a pull request is opened from |
 | `worktree.remote` | it names the destination a finished branch is published to |
 
-A project file may still describe its own pipeline: `role`, `owner`, the timeouts, `placement`,
-`worktree.branch`, `worktree.base`, and per column `auto`, `role`, `prompt`, `on_success`,
-`on_failure` and `timeout`.
+A project file may still describe its own pipeline: `role`, `human_only_role`, `owner`, the
+timeouts, `placement`, `worktree.branch`, `worktree.base`, and per column `auto`, `role`, `prompt`,
+`on_success`, `on_failure` and `timeout`.
 
 `columns.<status>.prompt` is accepted from a project file, but it is not treated as your policy. A
 stage instruction hvb reads out of the repository is quoted to the agent as repository material,
@@ -52,13 +52,15 @@ config is presented as policy, in hvb's own voice.
 ## Top level
 
 ```toml
-harness          = "claude"        # default agent kind; see `hvb harness list`
-role             = "fullstack_dev" # fallback when labels and status suggest nothing
-owner            = ""              # handle hvb claims features under; see below
-lock_ttl_minutes = 60              # vb lock TTL a dispatch takes; 0 disables locking
-start_timeout    = "90s"           # bounds `herdr agent start`
-prompt_timeout   = "10m"           # bounds a waiting `herdr agent prompt`
-placement        = "overlay"       # where `hvb tui` opens as a plugin pane
+harness            = "claude"        # default agent kind; see `hvb harness list`
+role               = "fullstack_dev" # fallback when labels and status suggest nothing
+human_only_role    = "destravador"   # charter a `hitl` card is routed to
+human_only_harness = "omp"           # harness that charter runs under
+owner              = ""              # handle hvb claims features under; see below
+lock_ttl_minutes   = 60              # vb lock TTL a dispatch takes; 0 disables locking
+start_timeout      = "90s"           # bounds `herdr agent start`
+prompt_timeout     = "10m"           # bounds a waiting `herdr agent prompt`
+placement          = "overlay"       # where `hvb tui` opens as a plugin pane
 ```
 
 `owner` resolves at use time: the configured value, then `$HVB_OWNER`, then `$USER`, then the
@@ -67,6 +69,15 @@ holder, so it is how a teammate or another board sees that a feature is taken.
 
 `lock_ttl_minutes = 0` turns locking off entirely, which is the right setting for a board only one
 person drives.
+
+A card labelled `hitl` is the owner's own hands — mint a credential, approve, click a dashboard —
+so no implementer charter may take it. It is not refused either: it routes to `human_only_role`,
+running under `human_only_harness`, and that agent researches the blocker and reports what the
+owner has to do. The routing beats an explicit `--role` and the column's role, because the card
+says what it is and a flag must not make the same card land on an implementer. A workspace that
+ships no such charter refuses the dispatch and says which file to write and where; it never falls
+back to the default role. Setting `human_only_role = ""` turns the routing off and restores the
+plain refusal.
 
 ## Columns
 
@@ -278,6 +289,7 @@ guessing which repository to branch from.
 | `HVB_QUEUE_DISPATCH_REPO` | default for `hvb queue --dispatch-repo`: the execution repository `usina agente dispatch` branches from |
 | `HVB_QUEUE_FOCUS_COLUMN` | default for `hvb queue --focus-column`: the column the board opens on |
 | `NO_COLOR` | draw the board without colour |
+| `HVB_NO_MOUSE` | set to any value to stop the board asking the terminal to report clicks. Mouse reporting takes the terminal's own text selection away, so export this if you copy out of the board, or if reporting misbehaves over your link. Same shape as `NO_COLOR` |
 
 ### Set inside a dispatched agent's pane
 

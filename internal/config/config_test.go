@@ -52,6 +52,56 @@ func TestLoadWithNoFilesReturnsDefaults(t *testing.T) {
 	}
 }
 
+// The unblocker routing ships working out of the box, because a `hitl` card
+// is common — 6 of the 33 on the owner's queue — and a default that resolved
+// to nothing would leave the card refused exactly as it was before.
+func TestUnblockerRoutingHasWorkingDefaults(t *testing.T) {
+	t.Setenv("HVB_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HumanOnlyRole != "destravador" {
+		t.Errorf("HumanOnlyRole = %q, want destravador", cfg.HumanOnlyRole)
+	}
+	if cfg.HumanOnlyHarness != "omp" {
+		t.Errorf("HumanOnlyHarness = %q, want omp", cfg.HumanOnlyHarness)
+	}
+}
+
+// Both fields overlay from a file, and they overlay independently: a config
+// that names one must leave the other's default alone, which is the failure
+// mode of a merge that forgets a field.
+func TestUnblockerRoutingOverlaysFromTheOperatorConfig(t *testing.T) {
+	t.Setenv("HVB_CONFIG", writeConfig(t, t.TempDir(), "config.toml",
+		"human_only_role = \"unblocker\"\nhuman_only_harness = \"pi\"\n"))
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HumanOnlyRole != "unblocker" || cfg.HumanOnlyHarness != "pi" {
+		t.Fatalf("HumanOnlyRole/HumanOnlyHarness = %q/%q, want the overrides",
+			cfg.HumanOnlyRole, cfg.HumanOnlyHarness)
+	}
+
+	// The charter key is a repository's to choose, exactly like `role`:
+	// it names a charter, not a program. The harness beside it is not, and
+	// TestProjectFileCannotSetOperatorPolicy holds that line.
+	t.Setenv("HVB_CONFIG", writeConfig(t, t.TempDir(), "config.toml", "human_only_harness = \"pi\"\n"))
+	root := t.TempDir()
+	writeConfig(t, root, ProjectFile, "human_only_role = \"destrava\"\n")
+	cfg, err = Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HumanOnlyRole != "destrava" {
+		t.Errorf("HumanOnlyRole = %q, want the project value", cfg.HumanOnlyRole)
+	}
+	if cfg.HumanOnlyHarness != "pi" {
+		t.Errorf("HumanOnlyHarness = %q, want the operator value to survive", cfg.HumanOnlyHarness)
+	}
+}
+
 // A project file that names one column must not erase the rest of the pipeline.
 //
 // The override here is `role`, not `harness`: a repository may describe its own
@@ -124,6 +174,7 @@ func TestProjectFileCannotSetOperatorPolicy(t *testing.T) {
 		key  string
 	}{
 		{"harness", "harness = \"pi\"\n", "harness"},
+		{"human only harness", "human_only_harness = \"pi\"\n", "human_only_harness"},
 		{"forge token", "[forge]\ntoken = \"attacker\"\n", "forge.token"},
 		{"forge kind", "[forge]\nkind = \"gitea\"\n", "forge.kind"},
 		{"forge base url", "[forge]\nbase_url = \"https://evil.tld\"\n", "forge.base_url"},

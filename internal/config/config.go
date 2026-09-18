@@ -34,6 +34,25 @@ type Config struct {
 	// Role is the fallback VirtualBoard role when a feature's labels and
 	// status suggest none.
 	Role string `toml:"role"`
+	// HumanOnlyRole is the charter key a `hitl` card is routed to. That
+	// card is the owner's own hands — mint a credential, approve, click a
+	// dashboard — so no implementer can close it, but one agent can still
+	// research the blocker and write down what the owner has to do. 6 of
+	// the 33 cards on the owner's queue carry the label, and before this
+	// they only ever produced a refusal.
+	//
+	// It is a key, not a prompt: what that agent does lives in the charter
+	// file, which is the only thing dispatch.BuildPrompt carries. An empty
+	// value turns the routing off and a `hitl` card is refused outright,
+	// which is also what a charter directory without this file gets — the
+	// one thing neither may do is fall back to an implementer.
+	HumanOnlyRole string `toml:"human_only_role"`
+	// HumanOnlyHarness is the harness that charter runs under, separate
+	// from Harness because the two jobs are not the same size: a dispatch
+	// implements a feature, this one reads a card, researches a blocker
+	// and reports back. `omp` is a harness `herdr agent start --kind`
+	// accepts (herdrcli.Kinds).
+	HumanOnlyHarness string `toml:"human_only_harness"`
 	// Owner is the handle written to a feature's `owner` frontmatter and
 	// its vb lock when hvb claims it. Empty resolves at use time from
 	// $HVB_OWNER, $USER, then the hostname.
@@ -236,14 +255,16 @@ func (d Duration) Duration() time.Duration { return time.Duration(d) }
 // builds, review checks, and done is terminal.
 func Default() Config {
 	return Config{
-		Harness:        "claude",
-		Role:           "fullstack_dev",
-		LockTTLMinutes: 60,
-		StartTimeout:   Duration(90 * time.Second),
-		PromptTimeout:  Duration(10 * time.Minute),
-		Placement:      "overlay",
-		Worktree:       Worktree{Branch: git.BranchTemplate, Remote: "origin"},
-		Forge:          Forge{Draft: true, PushRemotes: []string{"origin"}},
+		Harness:          "claude",
+		Role:             "fullstack_dev",
+		HumanOnlyRole:    "destravador",
+		HumanOnlyHarness: "omp",
+		LockTTLMinutes:   60,
+		StartTimeout:     Duration(90 * time.Second),
+		PromptTimeout:    Duration(10 * time.Minute),
+		Placement:        "overlay",
+		Worktree:         Worktree{Branch: git.BranchTemplate, Remote: "origin"},
+		Forge:            Forge{Draft: true, PushRemotes: []string{"origin"}},
 		Columns: map[string]Column{
 			string(feature.Backlog): {},
 			string(feature.InProgress): {
@@ -336,6 +357,11 @@ func GlobalPath() (string, error) {
 // than ignored, because the operator should find out that the repository tried.
 var operatorOnlyKeys = []string{
 	"harness",
+	// Same decision as `harness`, one card kind over: it names a program
+	// hvb starts with the operator's credentials. `human_only_role` is
+	// absent on purpose — it names a charter, which is exactly what `role`
+	// already lets a repository choose.
+	"human_only_harness",
 	"worktree.enabled",
 	"worktree.remote",
 	"forge.enabled",
@@ -412,6 +438,12 @@ func mergeFile(cfg *Config, path string, project bool) error {
 	}
 	if meta.IsDefined("role") {
 		cfg.Role = overlay.Role
+	}
+	if meta.IsDefined("human_only_role") {
+		cfg.HumanOnlyRole = overlay.HumanOnlyRole
+	}
+	if meta.IsDefined("human_only_harness") {
+		cfg.HumanOnlyHarness = overlay.HumanOnlyHarness
 	}
 	if meta.IsDefined("owner") {
 		cfg.Owner = overlay.Owner

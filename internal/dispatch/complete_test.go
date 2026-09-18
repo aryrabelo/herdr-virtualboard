@@ -26,6 +26,11 @@ type harness struct {
 	dispatcher *Dispatcher
 	root       string
 	vbArgv     func() []string
+	// herdrArgv is every `herdr` command line the dispatcher issued. It is
+	// how a test reads what actually reached Herdr — the harness kind in
+	// `agent start --kind`, for one — instead of re-deriving it from the
+	// same resolver the code under test uses.
+	herdrArgv func() []string
 }
 
 func newHarness(t *testing.T, statuses map[string]feature.Status, herdrScript string) *harness {
@@ -53,7 +58,7 @@ func newHarness(t *testing.T, statuses map[string]feature.Status, herdrScript st
 		t.Fatal(err)
 	}
 	vbClient, vbArgv := stub(t, "vb", `echo '{"success":true,"message":"ok","data":{"id":"x","status":"","owner":"","path":"","summary":""}}'`)
-	herdrBin, _ := stub(t, "herdr", herdrScript)
+	herdrBin, herdrArgv := stub(t, "herdr", herdrScript)
 
 	t.Setenv("HVB_DATA_DIR", t.TempDir())
 	store, err := runs.Open(ws.ID())
@@ -76,7 +81,8 @@ func newHarness(t *testing.T, statuses map[string]feature.Status, herdrScript st
 			Store:     store,
 			Roles:     []roles.Role{{Key: "backend_dev"}, {Key: "qa"}},
 		},
-		vbArgv: vbArgv,
+		vbArgv:    vbArgv,
+		herdrArgv: herdrArgv,
 	}
 }
 

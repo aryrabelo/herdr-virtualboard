@@ -116,6 +116,13 @@ type Model struct {
 	confirm *confirmation
 
 	lastLoad time.Time
+	// reloading is set while a background read is out, so the header can say
+	// so and a refresh that falls due meanwhile can be dropped.
+	reloading bool
+	// loads counts the reads folded into the board, background or
+	// synchronous. It is the generation a background read carries, so one
+	// that finished behind a fresher read is recognisable as stale.
+	loads    reloadToken
 	quitting bool
 }
 
@@ -211,26 +218,114 @@ func (m *Model) Resize(width, height int) {
 	m.width, m.height = width, height
 }
 
-// Reload refreshes the board from the backend, preserving the focused card by
-// identity rather than by index: a refresh that silently moves the selection
-// because another agent finished a feature is how a user dispatches the wrong
-// thing.
+// reloadToken names the board generation a background read was taken from, so
+// a result that finished after the board already moved on can be recognised
+// and dropped instead of applied.
+type reloadToken uint64
+
+// loadResult is the raw output of one backend read, on its way from the reload
+// goroutine back to the event loop.
+//
+// It carries data only, and deliberately: the reload goroutine never touches
+// the Model. Every field the renderer reads is still written on the event
+// loop's own goroutine, which is what keeps the board free of data races
+// without a mutex between the reader of every frame and the writer of every
+// card.
+type loadResult struct {
+	token    reloadToken
+	specs    []*feature.Spec
+	runs     []*runs.Run
+	problems []error
+}
+
+// Reloading reports whether a background read is in flight. The board says so
+// in the header: a read can take a minute on a real project, and a board that
+// looks idle while it waits is indistinguishable from a board that is stuck.
+func (m *Model) Reloading() bool { return m.reloading }
+
+// BeginReload claims the right to start one background read and returns the
+// token its result must carry. It refuses in two cases.
+//
+// An overlay is open: reloading under a form would fight with what the user is
+// typing.
+//
+// A read is already in flight: one reload shells out to `vb`, `gh` and the
+// project's own kit — measured at 69 seconds for a single `kit.py fronteira`
+// on the owner's board — while the refresh tick is 5 seconds. The tick is
+// DROPPED, never queued. Queueing would grow an unbounded backlog of reads
+// whose answers are already stale when they arrive, and the board would spend
+// the rest of the session catching up with itself.
+func (m *Model) BeginReload() (reloadToken, bool) {
+	if m.reloading || !m.reloadable() {
+		return 0, false
+	}
+	m.reloading = true
+	return m.loads, true
+}
+
+// Load performs the backend read for a background reload. It is the only
+// method meant to be called off the event loop's goroutine: it reads
+// m.backend, which is fixed for the model's lifetime, and nothing else.
+func (m *Model) Load(ctx context.Context, token reloadToken) loadResult {
+	specs, allRuns, problems := m.backend.Load(ctx)
+	return loadResult{token: token, specs: specs, runs: allRuns, problems: problems}
+}
+
+// ApplyReload folds a finished background read into the board, or drops it.
+//
+// It is dropped when the board has moved since the read was taken, which is
+// the same rule BeginReload applies, now seen from the far end of a read that
+// may have been out for a minute:
+//
+//   - An overlay opened while the read was out. The overlays hold references
+//     into the cards they were opened over and the form holds what the user
+//     typed; swapping the board underneath would act on a card that moved.
+//   - The board was reloaded in the meantime, by `r` or by the reload every
+//     mutation in update.go does after itself. The result describes the board
+//     as it was *before* the user's move, so applying it would visibly undo
+//     the move they just watched succeed.
+//
+// Either way the next tick starts a fresh read, so nothing is lost but a stale
+// answer.
+func (m *Model) ApplyReload(result loadResult) {
+	m.reloading = false
+	if !m.reloadable() || result.token != m.loads {
+		return
+	}
+	m.apply(result)
+}
+
+// reloadable reports whether the board is in a state a background reload may
+// touch: the two views that are only showing what the board already knows.
+func (m *Model) reloadable() bool {
+	return m.view == ViewBoard || m.view == ViewDetail
+}
+
+// Reload refreshes the board from the backend synchronously. It is what an
+// explicit request means — `r`, or the refresh a mutation does to see its own
+// effect — where the user is waiting for this particular answer and a later
+// one would be the wrong one.
 func (m *Model) Reload(ctx context.Context) {
+	m.apply(m.Load(ctx, m.loads))
+}
+
+// apply installs a completed read, preserving the focused card by identity
+// rather than by index: a refresh that silently moves the selection because
+// another agent finished a feature is how a user dispatches the wrong thing.
+func (m *Model) apply(result loadResult) {
 	focused := m.FocusedCard()
 	var focusedID string
 	if focused != nil {
 		focusedID = focused.Spec.ID
 	}
 
-	specs, allRuns, problems := m.backend.Load(ctx)
-
 	runsByFeature := map[string][]*runs.Run{}
-	for _, run := range allRuns {
+	for _, run := range result.runs {
 		runsByFeature[run.FeatureID] = append(runsByFeature[run.FeatureID], run)
 	}
 
 	columns := map[feature.Status][]*Card{}
-	for _, spec := range specs {
+	for _, spec := range result.specs {
 		card := &Card{Spec: spec, Runs: runsByFeature[spec.ID]}
 		for _, run := range card.Runs {
 			if run.Active() {
@@ -242,9 +337,10 @@ func (m *Model) Reload(ctx context.Context) {
 	}
 	m.columns = columns
 	m.undeclared = m.undeclaredColumns()
-	m.problems = append(problems, m.undeclaredProblems()...)
+	m.problems = append(result.problems, m.undeclaredProblems()...)
 	first := m.lastLoad.IsZero()
 	m.lastLoad = time.Now()
+	m.loads++
 
 	m.clampSelection()
 	switch {

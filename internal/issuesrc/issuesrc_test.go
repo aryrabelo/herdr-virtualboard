@@ -536,7 +536,7 @@ func TestFilaColumnsAndFeatureStatusesAgree(t *testing.T) {
 // two is on every card — two would put a card in two columns at once, and
 // none would make the policy fall back on a column it cannot trust.
 func TestEveryCardCarriesTheMeasuredIssueState(t *testing.T) {
-	specs, errs := load(t, healthy(), kitPath, slug)
+	specs, errs := load(t, healthy(), kitIn(t, ceoRepo), slug)
 	if len(errs) != 0 {
 		t.Fatalf("fila saudavel nao devia reportar problema: %v", errs)
 	}

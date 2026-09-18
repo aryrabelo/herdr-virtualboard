@@ -310,6 +310,58 @@ func TestCreateTabArgvAndResult(t *testing.T) {
 	}
 }
 
+// The group name is a positional, not a flag, and it is omitted rather than
+// passed empty — `usage: bora workspace set-group <workspace_id> [name]`.
+func TestSetWorkspaceGroupArgv(t *testing.T) {
+	client, argv := fakeHerdr(t, `echo '{"id":"x","result":{}}'`)
+	if err := client.SetWorkspaceGroup(context.Background(), "w2", "bugtoprompt"); err != nil {
+		t.Fatalf("SetWorkspaceGroup: %v", err)
+	}
+	if want, got := "workspace set-group w2 bugtoprompt", argv()[0]; got != want {
+		t.Errorf("argv = %q, want %q", got, want)
+	}
+
+	// `$*` joins with spaces and so cannot tell an omitted last argument
+	// from an empty one; the count can, and that is the difference between
+	// taking a workspace out of its group and naming a group "".
+	argc := filepath.Join(t.TempDir(), "argc")
+	client, argv = fakeHerdr(t, `printf '%s' "$#" > `+argc+`
+echo '{"id":"x","result":{}}'`)
+	if err := client.SetWorkspaceGroup(context.Background(), "w2", ""); err != nil {
+		t.Fatalf("SetWorkspaceGroup out of a group: %v", err)
+	}
+	if want, got := "workspace set-group w2", argv()[0]; got != want {
+		t.Errorf("argv = %q, want %q", got, want)
+	}
+	count, err := os.ReadFile(argc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(count) != "3" {
+		t.Errorf("the host got %s arguments, want 3 — the group omitted, not passed empty", count)
+	}
+}
+
+// A workspace in no group reports `"visual_group":null`, which must decode as
+// the empty string rather than failing the whole list: every workspace on the
+// owner's session that is not in one of his groups reports it that way.
+func TestWorkspacesDecodeTheSidebarGroup(t *testing.T) {
+	client, _ := fakeHerdr(t, `echo '{"id":"x","result":{"workspaces":[{"workspace_id":"wA","label":"bugtoprompt-api","visual_group":"bugtoprompt"},{"workspace_id":"wB","label":"bora","visual_group":null}]}}'`)
+	workspaces, err := client.Workspaces(context.Background())
+	if err != nil {
+		t.Fatalf("Workspaces: %v", err)
+	}
+	if len(workspaces) != 2 {
+		t.Fatalf("got %d workspaces", len(workspaces))
+	}
+	if workspaces[0].VisualGroup != "bugtoprompt" {
+		t.Errorf("grouped workspace VisualGroup = %q", workspaces[0].VisualGroup)
+	}
+	if workspaces[1].VisualGroup != "" {
+		t.Errorf("ungrouped workspace VisualGroup = %q, want empty", workspaces[1].VisualGroup)
+	}
+}
+
 // Cleanup has to be idempotent: a run can be torn down twice, once by the user
 // closing the pane and once by hvb reconciling.
 func TestClosePaneTreatsAMissingPaneAsClosed(t *testing.T) {

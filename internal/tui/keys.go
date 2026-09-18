@@ -6,11 +6,22 @@ import (
 	"unicode/utf8"
 )
 
-// Key is a decoded key press. Rune carries a printable character; the named
-// constants cover everything else the board binds.
+// Key is one decoded input event. Rune carries a printable character, the
+// named constants cover everything else the board binds, and Mouse carries a
+// pointer report when Name is KeyMouse.
+//
+// A mouse report is an input event, so it travels on the same channel as a key
+// press rather than on one of its own. The event loop's select already wakes
+// on this channel, already redraws when Handle says the board changed, and
+// already stops when Handle says to quit — a second case would be a second
+// copy of all three.
+//
+// Mouse is a value and not a pointer: a wheel notch arrives as fast as the
+// user can turn it, and a pointer here would allocate on every one.
 type Key struct {
-	Rune rune
-	Name string
+	Rune  rune
+	Name  string
+	Mouse Mouse
 }
 
 // Named keys.
@@ -31,6 +42,7 @@ const (
 	KeyCtrlC     = "ctrl-c"
 	KeyCtrlD     = "ctrl-d"
 	KeyCtrlL     = "ctrl-l"
+	KeyMouse     = "mouse"
 	KeyUnknown   = "unknown"
 )
 
@@ -120,6 +132,13 @@ func decodeEscape(reader *bufio.Reader) (Key, bool) {
 			return Key{Name: KeyEsc}, true
 		}
 		sequence = append(sequence, next)
+		// `ESC [ <` can only begin an SGR mouse report, and one always ends
+		// in `M` or `m`. Once those three bytes are in, the rest is known to
+		// be coming, so the reader below blocks for it instead of giving up
+		// on a report the terminal split across two writes.
+		if len(sequence) == 1 && b == '[' && next == '<' {
+			return readSGRMouse(reader)
+		}
 		if next >= 0x40 && next <= 0x7e {
 			break
 		}
@@ -146,6 +165,10 @@ func decodeEscape(reader *bufio.Reader) (Key, bool) {
 		return Key{Name: KeyPageDown}, true
 	case "Z":
 		return Key{Name: KeyShiftTab}, true
+	case "M":
+		// `CSI M` is never sent as input for anything but a legacy X10
+		// mouse report, and its payload must be consumed.
+		return readX10Mouse(reader)
 	default:
 		return Key{Name: KeyUnknown}, true
 	}

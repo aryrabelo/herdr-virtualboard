@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,12 +11,18 @@ import (
 	"github.com/virtualboard/herdr-virtualboard/internal/roles"
 )
 
-// Handle applies one key press. It returns whether the board needs redrawing,
-// which is every case except an ignored key.
+// Handle applies one input event. It returns whether the board needs
+// redrawing, which is every case except an ignored event.
 func (m *Model) Handle(ctx context.Context, key Key) bool {
 	if key.Name == KeyCtrlC {
 		m.quitting = true
 		return true
+	}
+	// A mouse report is dispatched by what the pointer did, not by which
+	// view is open, so handleMouse takes the view into account itself and
+	// every gesture stays in one place.
+	if key.Name == KeyMouse {
+		return m.handleMouse(key.Mouse)
 	}
 	switch m.view {
 	case ViewNewFeature:
@@ -57,7 +64,18 @@ func (m *Model) handleBoard(ctx context.Context, key Key) bool {
 		}
 	case key.Rune == '?':
 		m.view = ViewHelp
-	case key.Rune == 'q', key.Name == KeyEsc:
+	// Quitting is `q` and ctrl-C only. A bare Esc used to sit on this arm and
+	// leave the board with no confirmation, which made every escape sequence
+	// the terminal splits after its ESC byte a way to close the board by
+	// accident: a read boundary between ESC and `[` turns an arrow key or a
+	// mouse report into a lone Esc. Mouse reporting raised the rate of that
+	// accident by orders of magnitude, since a wheel notch emits a report.
+	// Nothing is lost by dropping it: `q` already quits from here, ctrl-C
+	// quits from anywhere (checked before this switch), and Esc keeps being
+	// the cancel in every overlay and the only cancel in the new-feature
+	// form, where `q` types the letter instead. This is also what the help
+	// screen has always claimed: "esc q — back, then quit".
+	case key.Rune == 'q':
 		m.quitting = true
 	case key.Rune == 'r':
 		m.Reload(ctx)
@@ -486,23 +504,19 @@ func (m *Model) openDispatchPicker() {
 		return
 	}
 	suggested, err := roles.Suggest(available, card.Spec, m.backend.Config().Role)
+	if errors.Is(err, roles.ErrHumanOnly) {
+		m.dispatchUnblocker(card)
+		return
+	}
 	if err != nil {
-		// The refusal has to stop the picker, not merely fail to
-		// preselect a row. Measured live on the owner's board: pressing d
-		// on ceo-bora#160 (labels `project:bugtoprompt hitl`) opened this
-		// picker with `cartografo` preselected and `⏎ confirm` ready,
-		// because the refusal used to land in `_` and an unresolved
-		// suggestion left the index at 0, the first charter
-		// alphabetically.
-		//
-		// Any error refuses to open, and there is only one reachable
-		// here: len(available) is checked above, and with charters
-		// present Suggest always names a role unless it refuses. The
-		// error already names the card and the reason — which is the
-		// owner's own hands, not a missing charter, so it must not send
-		// the user to .virtualboard/agents — so the board shows it as
-		// roles wrote it and there is no second sentence to keep in step
-		// with the one dispatch prints.
+		// Nothing else is reachable here — len(available) is checked
+		// above, and with charters present Suggest either names a role
+		// or answers ErrHumanOnly — but a picker must never open on an
+		// unresolved suggestion. Measured live on the owner's board:
+		// pressing d on ceo-bora#160 (labels `project:bugtoprompt
+		// hitl`) opened this picker with `cartografo` preselected and
+		// `⏎ confirm` ready, because an unresolved suggestion left the
+		// index at 0, the first charter alphabetically.
 		m.setError(err)
 		return
 	}
@@ -538,6 +552,31 @@ func (m *Model) openDispatchPicker() {
 		},
 	}
 	m.view = ViewDispatchPicker
+}
+
+// dispatchUnblocker launches an agent on a card only the owner's own hands can
+// close, with no picker in between.
+//
+// There is nothing to pick. The role is forced — the dispatcher routes a
+// `hitl` card to the unblocker charter and to nothing else — and a one-row
+// picker would be a question with one answer, costing a second keystroke to
+// ask it. d is already the dispatch verb, and what the owner asked for is that
+// pressing it on a blocked card start an agent that works out what he has to
+// do. So the keystroke does that.
+//
+// Both arguments are left empty deliberately. The role and the harness for
+// this card are the dispatcher's to decide (dispatch.resolveRole and
+// resolveKind, via config.HumanOnlyRole and HumanOnlyHarness), and a board
+// that named either one would be a second copy of the routing to keep in
+// step — including its refusal when the charter is missing, which must stay
+// one sentence written in one place.
+func (m *Model) dispatchUnblocker(card *Card) {
+	run, err := m.backend.Dispatch(context.Background(), card.Spec, "", "", false)
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	m.setStatus("%s needs you — %s is working out what, in %s", run.FeatureID, run.Role, run.PaneID)
 }
 
 func (m *Model) openPriorityPicker() {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +52,13 @@ func (m *Model) renderHeader() string {
 		total += count
 	}
 	left := paint(m.palette.Bold, " VirtualBoard ") + paint(m.palette.Accent, m.backend.ProjectName())
+	if m.Reloading() {
+		// A backend read can take a minute; without this the board looks
+		// frozen, not busy. Text, so it stays legible on an empty board and
+		// under NO_COLOR; Running is the same blue the board already uses
+		// for work in flight.
+		left += paint(m.palette.Running, " reading…")
+	}
 
 	// Two cells are spoken for whatever the summary says: the gap that
 	// separates the two halves, and the trailing space the header has
@@ -82,12 +90,13 @@ func (m *Model) headerSummary(counts map[feature.Status]int, total, budget int) 
 	room := budget - displayWidth(prefix) - displayWidth(suffix)
 
 	separator := paint(m.palette.Border, " · ")
-	segments := m.headerCounts(counts, m.compact())
+	needs := m.needsAnswerCounts()
+	segments := m.headerCounts(counts, needs, m.compact())
 	joined := strings.Join(segments, separator)
 	if displayWidth(joined) > room && !m.compact() {
 		// A zero is the least a reader loses: the column is on screen
 		// and visibly empty.
-		segments = m.headerCounts(counts, true)
+		segments = m.headerCounts(counts, needs, true)
 		joined = strings.Join(segments, separator)
 	}
 	elision := paint(m.palette.Border, "… ")
@@ -106,17 +115,58 @@ func (m *Model) headerSummary(counts map[feature.Status]int, total, budget int) 
 
 // headerCounts is one painted `SHORT n` per drawn column, optionally without
 // the empty ones.
-func (m *Model) headerCounts(counts map[feature.Status]int, skipEmpty bool) []string {
+func (m *Model) headerCounts(counts, needs map[feature.Status]int, skipEmpty bool) []string {
 	order := m.columnOrder()
 	segments := make([]string, 0, len(order))
 	for _, status := range order {
 		if skipEmpty && counts[status] == 0 {
 			continue
 		}
-		segments = append(segments, paint(m.palette.Status(status, m.workflow.Index(status)),
-			fmt.Sprintf("%s %d", m.workflow.Short(status), counts[status])))
+		segment := paint(m.palette.Status(status, m.workflow.Index(status)),
+			fmt.Sprintf("%s %d", m.workflow.Short(status), counts[status]))
+		segment += m.needsAnswerShare(needs[status], counts[status])
+		segments = append(segments, segment)
 	}
 	return segments
+}
+
+// needsAnswerCounts is how many cards in each column are waiting on the owner
+// himself. Per column and not one board-wide number, because the board has to
+// say WHERE they are: fila.ColumnFor sends every open `hitl` issue to Blocked,
+// but a hand-written VirtualBoard spec can carry the label in any status, and a
+// single total would put those cards nowhere.
+func (m *Model) needsAnswerCounts() map[feature.Status]int {
+	out := map[feature.Status]int{}
+	for _, status := range m.columnOrder() {
+		for _, card := range m.columns[status] {
+			if m.cardNeedsAnswer(card.Spec) {
+				out[status]++
+			}
+		}
+	}
+	return out
+}
+
+// needsAnswerShare is what a column's header segment adds when some of its
+// cards are waiting on the owner.
+//
+// It is a share of an existing count, not a counter of its own. Measured on
+// the owner's queue (2026-09-18), all 6 cards in BLOCKED are `hitl`, so a
+// separate `YOU 6` beside `BLOCK 6` would print the same digit twice and
+// teach the eye to skip one of them. So: the glyph alone when the whole
+// column is his to answer (`BLOCK 6◆` — the digit is already on screen), and
+// the glyph with a number when it is a part of the column (`BLOCK 6 ◆2`),
+// which is the shape the header takes the day kit.py blocks a card that is
+// not his.
+func (m *Model) needsAnswerShare(needs, total int) string {
+	switch {
+	case needs <= 0:
+		return ""
+	case needs >= total:
+		return paint(m.palette.NeedsAnswer, needsAnswerGlyph)
+	default:
+		return paint(m.palette.NeedsAnswer, " "+needsAnswerGlyph+strconv.Itoa(needs))
+	}
 }
 
 func (m *Model) renderFooter() string {
@@ -383,6 +433,17 @@ func (m *Model) crumbTrail(labels, colours []string, width int) string {
 	return trail.String()
 }
 
+// focusCaretGlyph marks the focused column — its title bar and, when the
+// column is empty, its placeholder. It is U+25B8 BLACK RIGHT-POINTING SMALL
+// TRIANGLE, which the owner's terminal font
+// (~/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf) maps to glyph 1238.
+// Measured by parsing the font's cmap the same way the needsAnswer diamond
+// was: the parser reports the control U+25C6 as glyph 1252 (present) and
+// U+25D0 as glyph 0 (absent), so it reads per-codepoint coverage, not a whole
+// Unicode block. It is text, not an SGR, so column focus stays visible under
+// NO_COLOR.
+const focusCaretGlyph = "▸"
+
 // renderColumn draws one lifecycle column into a fixed width and height.
 //
 // The body is built at the inner width and the separator is appended to every
@@ -400,7 +461,16 @@ func (m *Model) renderColumn(status feature.Status, width, height int, focused b
 	title := fmt.Sprintf("%s %d", strings.ToUpper(m.workflow.Title(status)), len(cards))
 	titleColour := m.palette.Status(status, m.workflow.Index(status))
 	if focused {
-		titleColour += m.palette.Bold
+		// The old signal was `+= Bold`, and Bold is an SGR: under NO_COLOR
+		// it is the empty string, so a colour-blind terminal got no focus
+		// mark at all — and on a zero-card column there is not even a
+		// selected card to invert. The fix has to show in both places. The
+		// caret is text (it survives NO_COLOR), and Invert turns the whole
+		// title into a solid block of the column's own status hue — the
+		// "shine" the owner asked for. focusCaretGlyph carries its own
+		// font-coverage proof.
+		title = focusCaretGlyph + " " + title
+		titleColour += m.palette.Invert
 	}
 	body = append(body, paint(titleColour, fit(title, inner)))
 	body = append(body, paint(m.palette.Border, strings.Repeat("─", inner)))
@@ -420,7 +490,17 @@ func (m *Model) renderColumn(status feature.Status, width, height int, focused b
 			body = append(body, block...)
 		}
 		if len(cards) == 0 && len(body) < height {
-			body = append(body, paint(m.palette.Dim, fit(" —", inner)))
+			placeholder := paint(m.palette.Dim, fit(" —", inner))
+			if focused {
+				// The empty column has to declare its focus too: a focused
+				// empty column and an unfocused one used to be byte-for-byte
+				// identical — the exact column the owner watched stop
+				// "brilhando" the day REVIEW hit zero cards. Same caret +
+				// Invert as the title, so the whole empty column reads as one
+				// highlighted block, with colour and without it.
+				placeholder = paint(titleColour, fit(" "+focusCaretGlyph+" —", inner))
+			}
+			body = append(body, placeholder)
 		}
 	}
 
@@ -459,13 +539,35 @@ func (m *Model) gutter(width, inner int) string {
 // id and a sentence side by side; and the chips row carries every label the
 // sources did not mint for themselves, since `hvb:*` labels are the board's
 // own bookkeeping and mean nothing to the person reading.
+//
+// A card waiting on the owner's own hands gets two marks of its own, because
+// he asked for exactly that — "tem que ser claro que tá precisando de uma
+// resposta minha":
+//
+//	◆ ceo-bora#160 (issue) · @aryrabelo · 3d
+//	  Mintar a credencial da factory
+//	  ◆ NEEDS YOU  project:bugtoprompt
+//
+// The badge leads the chip row so a 26-column card truncates the labels
+// instead of the badge, and the gutter glyph puts the same mark at the card's
+// left edge, where the eye scans a column.
 func (m *Model) renderCard(card *Card, width int, selected bool) []string {
+	needsAnswer := m.cardNeedsAnswer(card.Spec)
 	marker := " "
 	markerColour := ""
-	if card.Active != nil {
+	switch {
+	case card.Active != nil:
+		// A live run is fresher news than a standing question, and after
+		// the unblocker lands a `hitl` card can have one. The chip row
+		// still carries the badge, so nothing is lost.
 		marker, markerColour = runGlyph(card.Active.State), m.palette.RunState(card.Active.State)
-	} else if latest := latestRun(card.Runs); latest != nil {
-		marker, markerColour = runGlyph(latest.State), m.palette.Dim
+	case needsAnswer:
+		marker, markerColour = needsAnswerGlyph, m.palette.NeedsAnswer
+	default:
+		// latestRun sorts a copy, so it stays behind both cases above.
+		if latest := latestRun(card.Runs); latest != nil {
+			marker, markerColour = runGlyph(latest.State), m.palette.Dim
+		}
 	}
 
 	var head []string
@@ -492,6 +594,9 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 	titleLine := "  " + truncate(card.Spec.Title, width-3)
 
 	var chips []string
+	if needsAnswer {
+		chips = append(chips, paint(m.palette.NeedsAnswer, needsAnswerBadge))
+	}
 	if card.Spec.Priority != "" {
 		chips = append(chips, paint(m.palette.Priority(card.Spec.Priority), card.Spec.Priority))
 	}
@@ -519,6 +624,10 @@ func (m *Model) renderCard(card *Card, width int, selected bool) []string {
 	}
 	chips = append(chips, m.sourceMeta(card)...)
 	for _, label := range visibleLabels(card.Spec) {
+		// The badge already said this one, in a word instead of a token.
+		if needsAnswer && labelIsHITL(label) {
+			continue
+		}
 		chips = append(chips, paint(m.palette.Dim, label))
 	}
 	chipLine := "  " + strings.Join(chips, "  ")

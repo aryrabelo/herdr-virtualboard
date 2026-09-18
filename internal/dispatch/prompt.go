@@ -3,9 +3,12 @@ package dispatch
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -156,6 +159,169 @@ func BuildPrompt(in PromptInput) string {
 	b.WriteString("When you are finished, report with a single `hvb run done`.\n")
 
 	return b.String()
+}
+
+// promptFileMode is the mode of a written prompt file, promptDirMode of the
+// directory hvb creates to hold them.
+//
+// Both match runs.Store (internal/runs/store.go): the file carries the role
+// charter and the whole repository material for one run, which is the same
+// material the run store already keeps user-private, and its only readers are
+// this user's board and the agent it launches under the same uid. Nothing else
+// on the machine has a reason to read it, so nothing else is given the chance.
+// dir is created rather than required to exist — a run's state directory is
+// hvb's own, and refusing a dispatch because hvb had not made its own
+// directory yet would be a failure with no operator on the other end of it.
+const (
+	promptFileMode = 0o600
+	promptDirMode  = 0o700
+)
+
+// WritePromptFile writes the prompt for one dispatch into dir and returns the
+// path it landed on.
+//
+// A dispatch prompt reaches ~11 KB, and terminal input is where that gets
+// lost: the harness wraps a long submission in a bracketed paste and the agent
+// on the other side collapses it to a marker carrying a line count and no
+// body. The file is the delivery channel; FilePointerPrompt is the short
+// message that names it.
+//
+// What lands in the file is BuildPrompt's bytes unchanged, so the
+// untrusted-content fence, its nonce and the preamble explaining it all still
+// apply inside the file: the boundary between hvb's voice and the repository's
+// is drawn in the text itself and does not depend on how the text travelled.
+//
+// The returned path is absolute. It is read by an agent whose working
+// directory is the project root, or a worktree of it, and a relative path
+// would be resolved against whichever of those the agent happens to sit in
+// rather than against hvb's own cwd.
+func WritePromptFile(dir string, in PromptInput) (string, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve prompt directory %s: %w", dir, err)
+	}
+	path := filepath.Join(absolute, promptFileName(in))
+
+	if err := os.MkdirAll(absolute, promptDirMode); err != nil {
+		return "", fmt.Errorf("create prompt directory %s: %w", absolute, err)
+	}
+
+	// Written to a temporary neighbour and renamed over the target, the way
+	// the run store writes itself. A dispatch whose prompt is resubmitted
+	// rewrites the path a live agent may be reading at that moment, and a
+	// plain truncating write would let it read a prompt cut in half — a
+	// charter without its contract is exactly the failure the fence exists
+	// to prevent.
+	temp, err := os.CreateTemp(absolute, ".prompt-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create prompt file in %s: %w", absolute, err)
+	}
+	if _, err := temp.WriteString(BuildPrompt(in)); err != nil {
+		temp.Close()
+		os.Remove(temp.Name())
+		return "", fmt.Errorf("write prompt file %s: %w", path, err)
+	}
+	if err := temp.Chmod(promptFileMode); err != nil {
+		temp.Close()
+		os.Remove(temp.Name())
+		return "", fmt.Errorf("chmod prompt file %s: %w", path, err)
+	}
+	if err := temp.Close(); err != nil {
+		os.Remove(temp.Name())
+		return "", fmt.Errorf("write prompt file %s: %w", path, err)
+	}
+	if err := os.Rename(temp.Name(), path); err != nil {
+		os.Remove(temp.Name())
+		return "", fmt.Errorf("write prompt file %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// promptFileName names one run's prompt file.
+//
+// The readable half comes from the run id, and runs.NewID already builds that
+// from the feature id, a UTC timestamp and four random bytes. One file per run
+// therefore falls out of the name: a second dispatch of the same card writes a
+// different file and cannot take away the prompt a live run is still reading,
+// while re-writing the SAME run — Reconcile submits a deferred prompt once the
+// harness unblocks — lands back on the same path and replaces that run's own
+// bytes, so retries replace instead of accumulating.
+//
+// The digest half is not decoration. A run id descends from Spec.ID, which on
+// this board is a GitHub issue's identifier: third-party text that may carry
+// `/`, `..`, or any other separator. slugForFile keeps only the characters a
+// file name is made of, which is what contains the traversal, but it is not
+// injective — `FTR/1` and `FTR-1` slug alike — so the digest of the raw key
+// restores injectivity and two live runs whose ids differ only in stripped
+// characters still get two files.
+func promptFileName(in PromptInput) string {
+	key := strings.TrimSpace(in.RunID)
+	if key == "" && in.Spec != nil {
+		// A caller with no run id still gets a contained, stable name.
+		key = strings.TrimSpace(in.Spec.ID)
+	}
+	digest := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("prompt-%s-%s.md", slugForFile(key, 60), hex.EncodeToString(digest[:4]))
+}
+
+// slugForFile reduces externally-supplied text to the characters a file name
+// is made of.
+//
+// Path separators, dots, spaces, `#` and control bytes all become `-`, so the
+// result is a single path element with no `..` left in it and cannot climb out
+// of the directory it is joined to. Dropping dots entirely is deliberate:
+// trimming a leading `..` would still leave `..%2f`-shaped surprises to reason
+// about, and a run's file name has no use for a dot it did not write itself.
+func slugForFile(text string, limit int) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+		if b.Len() >= limit {
+			break
+		}
+	}
+	slug := strings.Trim(b.String(), "-_")
+	if slug == "" {
+		return "run"
+	}
+	return slug
+}
+
+// promptPointerBudget is the size FilePointerPrompt is held under.
+//
+// Delivery is what broke: ~11 KB of prompt reached the agent as a collapsed
+// paste marker with a line count and no body. The pointer is kept to a few
+// hundred bytes and a handful of lines — the size of something a person would
+// type — which is two orders of magnitude under the payload that collapsed and
+// well inside a pane's input queue. The constant is here so the test can hold
+// the text to it rather than to a number nobody can trace back to a reason.
+const promptPointerBudget = 600
+
+// FilePointerPrompt is the text the agent actually receives over the terminal:
+// the path, and the instruction to read it.
+//
+// It repeats none of the prompt's content, which is the whole point — the
+// content is what could not survive the trip — and it claims nothing the file
+// does not carry. It is plain prose with no harness-specific syntax, so
+// claude, omp and codex all read it the same way.
+//
+// `hvb run done` is said here as well as at the end of the file. The file is
+// authoritative, but the pointer is the only part hvb can be sure reached the
+// model, and an agent that never opens the file must still know how to report
+// or the run hangs on the board with nobody able to close it. For the same
+// reason the pointer tells it to stop and say so rather than invent a task
+// from a path it could not read.
+func FilePointerPrompt(path string) string {
+	return "Your assignment for this pane is written in one file. Read it now and follow it exactly:\n\n" +
+		path + "\n\n" +
+		"That file carries the contract you work under and the feature to work; this message is only " +
+		"a pointer and replaces nothing in it. If you cannot read that file, say so and stop instead " +
+		"of guessing the task. When you are finished, report with a single `hvb run done`.\n"
 }
 
 // untrustedPreamble explains the block, in hvb's voice, immediately above it.

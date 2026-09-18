@@ -135,8 +135,15 @@ var labelHints = []struct {
 	{[]string{"rumo:map"}, "cartografo"},
 }
 
-// ErrHumanOnly reports a card no agent may be dispatched onto at all: the work
-// is the owner's own hands, and no charter can finish it.
+// ErrHumanOnly reports a card no implementer may be dispatched onto: the work
+// is the owner's own hands, and no charter here can finish it.
+//
+// It says what the card is, not what to do about it. The caller decides that,
+// and dispatch does route it — to the one charter written for a blocked card
+// (config.HumanOnlyRole), which researches the blocker and reports what the
+// owner has to do rather than trying to close it. The sentinel stays the
+// answer either way: this package knows the label, not the operator's
+// configuration, and a caller that has no unblocker charter must refuse.
 //
 // It is why Suggest answers with an error instead of a second bool. That bool
 // carried two facts at once — "no charter matched", where falling back to the
@@ -174,9 +181,9 @@ func Suggest(all []Role, spec *feature.Spec, fallback string) (Role, error) {
 	// invariant, so it reads from the same const.
 	//
 	// It beats the hints and the `role:` label both: all three are card
-	// content of equal authority, and no charter fits a card an agent
-	// cannot finish. 6 of the 33 cards on the owner's queue carry it, and
-	// each dispatch there would spend tokens to learn that.
+	// content of equal authority, and no implementer charter fits a card
+	// an agent cannot finish. 6 of the 33 cards on the owner's queue carry
+	// it, and each dispatch there would spend tokens to learn that.
 	//
 	// The refusal is decided before the charter set is even looked at,
 	// because it is a property of the card and not of what the workspace
@@ -186,7 +193,7 @@ func Suggest(all []Role, spec *feature.Spec, fallback string) (Role, error) {
 	if spec != nil {
 		for _, label := range spec.Labels {
 			if normalize(label) == normalize(fila.LabelHITL) {
-				return Role{}, fmt.Errorf("%w: %s is labelled %s — that is the owner's own hands (mint a credential, approve, click a dashboard), so no charter fits it", ErrHumanOnly, spec.ID, fila.LabelHITL)
+				return Role{}, fmt.Errorf("%w: %s is labelled %s — that is the owner's own hands (mint a credential, approve, click a dashboard), so no implementer charter fits it", ErrHumanOnly, spec.ID, fila.LabelHITL)
 			}
 		}
 	}

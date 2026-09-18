@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -89,9 +90,19 @@ var ErrUnknownHarness = errors.New("unknown harness")
 // the pane must exist, with its cwd and environment already set, before the
 // harness is asked to occupy it.
 //
+// A plain run gets its own workspace, filed under the same sidebar group as
+// the workspace hosting the project:
+//
+//	group `bugtoprompt`             the project workspace's own group
+//	 └─ workspace `ftr-0007 · qa`   one per run, cwd = project root
+//	     └─ root pane               env = the run's variables; the harness
+//
+// A worktree run is placed inside the linked workspace Herdr already opened
+// for the checkout, where it is a pane in the feature's tab:
+//
 //	tab   `ftr-0007`        stable per feature, reused across runs
 //	 └─ anchor pane         a plain shell; the split parent
-//	     └─ run pane        cwd = project root, env = the run's variables
+//	     └─ run pane        cwd = the checkout, env = the run's variables
 //
 // After a successful launch the anchor is closed, leaving exactly the harness
 // pane visible. A failed launch keeps the anchor: it is the evidence of what
@@ -105,11 +116,11 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 	// so a card no agent may take costs no pane, no vb lock, no worktree
 	// and no run record.
 	column := d.Config.Column(req.Spec.Status)
-	role, err := d.resolveRole(req, column)
+	role, humanOnly, err := d.resolveRole(req, column)
 	if err != nil {
 		return nil, err
 	}
-	kind := d.resolveKind(req, column)
+	kind := d.resolveKind(req, column, humanOnly)
 	if !herdrcli.ValidKind(kind) {
 		return nil, fmt.Errorf("%w: %q is not a harness herdr can start (see `hvb harness list`)", ErrUnknownHarness, kind)
 	}
@@ -152,11 +163,36 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 		run.Worktree = worktree
 	}
 
-	if err := d.Store.Append(run); err != nil {
+	// A missing charter degrades the prompt but must not abort the dispatch.
+	// It is reported below, once a run record exists to hold the note.
+	charter, charterErr := role.Charter()
+	if charterErr != nil {
+		charter = ""
+		if role.Path == "" {
+			// No charter file was ever loaded, which is roles.Load's
+			// documented fallback and not a fault worth reporting.
+			charterErr = nil
+		}
+	}
+	// The prompt file is written before the run is stored, for the same
+	// reason the worktree is cut before it: a failure here means no dispatch
+	// happened at all. This one refuses rather than degrades — an agent
+	// started without its task is an agent with a shell in the owner's
+	// repository and no instructions, which is worse than one never started.
+	promptPath, err := d.writePrompt(req, run, role, column, charter)
+	if err != nil {
+		d.releaseLock(ctx, req.Spec.ID)
 		return nil, err
 	}
 
-	if err := d.launch(ctx, req, run, role, column, kind); err != nil {
+	if err := d.Store.Append(run); err != nil {
+		return nil, err
+	}
+	if charterErr != nil {
+		d.note(run.ID, fmt.Sprintf("role charter unreadable: %v", charterErr))
+	}
+
+	if err := d.launch(ctx, req, run, role, column, kind, promptPath); err != nil {
 		if _, finishErr := d.Store.Finish(run.ID, runs.Failed, "dispatch_error", err.Error()); finishErr != nil {
 			return nil, errors.Join(err, finishErr)
 		}
@@ -166,18 +202,10 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 	return d.Store.Get(run.ID)
 }
 
-func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, role roles.Role, column config.Column, kind string) error {
-	// A worktree run already has its workspace: the linked one Herdr opened
-	// for the checkout. Only a plain run has to find or create one.
-	workspaceID := ""
+func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, role roles.Role, column config.Column, kind, promptPath string) error {
 	cwd := d.Workspace.Root
 	if run.Worktree != nil {
-		workspaceID, cwd = run.Worktree.WorkspaceID, run.Worktree.Path
-	} else {
-		var err error
-		if workspaceID, err = d.resolveWorkspace(ctx); err != nil {
-			return err
-		}
+		cwd = run.Worktree.Path
 	}
 
 	env := Env(req.Spec, run.ID, role.Key, d.Workspace.Root, column)
@@ -189,56 +217,96 @@ func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, rol
 		env["HVB_BASE_BRANCH"] = run.Worktree.Base
 	}
 
-	tabID, anchorID, err := d.resolveTab(ctx, workspaceID, run, env, cwd)
-	if err != nil {
-		return err
-	}
-	if _, err := d.Store.Update(run.ID, func(r *runs.Run) error {
-		r.WorkspaceID, r.TabID, r.AnchorPane = workspaceID, tabID, anchorID
-		return nil
-	}); err != nil {
-		return err
+	var workspaceID, tabID, anchorID, paneID string
+	if run.Worktree != nil {
+		// A worktree run already has its workspace: the linked one Herdr
+		// opened for the checkout. The run belongs inside it, because that
+		// workspace *is* the checkout's place in the sidebar, so here the
+		// run is a pane in the feature's tab.
+		workspaceID = run.Worktree.WorkspaceID
+		var err error
+		if tabID, anchorID, err = d.resolveTab(ctx, workspaceID, run, env, cwd); err != nil {
+			return err
+		}
+		// Recorded before the split so a failed split still leaves behind
+		// the tab and anchor it was going to happen in.
+		if _, err := d.Store.Update(run.ID, func(r *runs.Run) error {
+			r.WorkspaceID, r.TabID, r.AnchorPane = workspaceID, tabID, anchorID
+			return nil
+		}); err != nil {
+			return err
+		}
+		pane, err := d.Herdr.SplitPane(ctx, anchorID, "right", cwd, env, req.Focus)
+		if err != nil {
+			return fmt.Errorf("split run pane: %w", err)
+		}
+		paneID = pane.PaneID
+	} else {
+		workspace, tab, root, err := d.createRunWorkspace(ctx, run, role, env, cwd, req.Focus)
+		if err != nil {
+			return err
+		}
+		workspaceID, tabID, paneID = workspace.WorkspaceID, tab.TabID, root.PaneID
+		if _, err := d.Store.Update(run.ID, func(r *runs.Run) error {
+			r.WorkspaceID, r.TabID = workspaceID, tabID
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 
-	pane, err := d.Herdr.SplitPane(ctx, anchorID, "right", cwd, env, req.Focus)
-	if err != nil {
-		return fmt.Errorf("split run pane: %w", err)
-	}
 	agentName := runs.AgentName(run.FeatureID, run.ID)
 	if _, err := d.Store.Update(run.ID, func(r *runs.Run) error {
-		r.PaneID, r.AgentName, r.State = pane.PaneID, agentName, runs.Running
+		r.PaneID, r.AgentName, r.State = paneID, agentName, runs.Running
 		return nil
 	}); err != nil {
 		return err
 	}
 	// Best-effort cosmetics: a pane that could not be relabelled still runs.
-	_ = d.Herdr.RenamePane(ctx, pane.PaneID, runs.PaneLabel(run.FeatureID, role.Key))
+	_ = d.Herdr.RenamePane(ctx, paneID, runs.PaneLabel(run.FeatureID, role.Key))
 
-	blocked, err := d.startAgent(ctx, agentName, kind, pane.PaneID)
+	blocked, err := d.startAgent(ctx, agentName, kind, paneID)
 	if err != nil {
 		return fmt.Errorf("start %s agent: %w", kind, err)
 	}
 
 	// The anchor has done its job. Closing a split parent is safe — the
 	// child keeps its process and environment — and leaves the user looking
-	// at one pane per run instead of two.
-	if err := d.Herdr.ClosePane(ctx, anchorID); err == nil {
-		if _, updateErr := d.Store.Update(run.ID, func(r *runs.Run) error {
-			r.AnchorPane = ""
-			return nil
-		}); updateErr != nil {
-			return updateErr
+	// at one pane per run instead of two. A run in its own workspace never
+	// had one.
+	if anchorID != "" {
+		if err := d.Herdr.ClosePane(ctx, anchorID); err == nil {
+			if _, updateErr := d.Store.Update(run.ID, func(r *runs.Run) error {
+				r.AnchorPane = ""
+				return nil
+			}); updateErr != nil {
+				return updateErr
+			}
 		}
 	}
 
-	charter, err := role.Charter()
-	if err != nil && role.Path != "" {
-		// A missing charter degrades the prompt but must not abort a run
-		// whose agent is already live in its pane.
-		d.note(run.ID, fmt.Sprintf("role charter unreadable: %v", err))
-		charter = ""
-	}
-	prompt := BuildPrompt(PromptInput{
+	return d.submitPrompt(ctx, run.ID, agentName, FilePointerPrompt(promptPath), blocked)
+}
+
+// writePrompt renders the run's prompt to a file and returns its path.
+//
+// The prompt is delivered by reference, never by value. `bora agent prompt`
+// takes the text in argv and the host hands it to the harness wrapped in a
+// bracketed paste, which the harness is free to collapse — measured on the
+// owner's session, an 11 KB prompt arrived as `[Paste #1, +222 lines]` and the
+// body never reached the model: the agent went looking for the content in
+// `local://` and in its session directory, found nothing, and stopped. The
+// pane input queue is capped as well, so argv delivery of a prompt this size
+// is fragile for two independent reasons. A path is short enough for both, and
+// a file is a thing every harness can read.
+//
+// The file lives beside the run store, which is where hvb's other
+// machine-local bookkeeping about a run already lives: same lifetime, same
+// directory, inspectable long after the pane is gone. It deliberately does not
+// live in the repository — a file written there would turn up in the agent's
+// own `git status` on its first turn, and in its commit if it is careless.
+func (d *Dispatcher) writePrompt(req Request, run *runs.Run, role roles.Role, column config.Column, charter string) (string, error) {
+	path, err := WritePromptFile(promptsDir(d.Store), PromptInput{
 		Spec:     req.Spec,
 		Role:     role,
 		Charter:  charter,
@@ -248,7 +316,80 @@ func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, rol
 		Worktree: run.Worktree,
 		WantPR:   run.PullRequest != nil,
 	})
-	return d.submitPrompt(ctx, run.ID, agentName, prompt, blocked)
+	if err != nil {
+		return "", fmt.Errorf("write the run's prompt file: %w", err)
+	}
+	return path, nil
+}
+
+// promptsDir is the directory holding run prompt files, a sibling of the run
+// file itself. WritePromptFile creates it.
+func promptsDir(store *runs.Store) string {
+	return filepath.Join(filepath.Dir(store.Path()), "prompts")
+}
+
+// createRunWorkspace opens the run its own Herdr workspace, filed under the
+// same sidebar group as the workspace hosting the project.
+//
+// A workspace, and not a split off the caller's pane. A split puts the harness
+// wherever the board happens to be running: a board in some other workspace's
+// tab dispatches an agent into that tab, which is exactly where the owner
+// found one. A run is its own unit of work and gets its own row in the
+// sidebar, next to the repository it works on.
+func (d *Dispatcher) createRunWorkspace(ctx context.Context, run *runs.Run, role roles.Role, env map[string]string, cwd string, focus bool) (*herdrcli.Workspace, *herdrcli.Tab, *herdrcli.Pane, error) {
+	group, err := d.sidebarGroup(ctx)
+	if err != nil {
+		// Grouping is cosmetic, so its failures are notes. An agent
+		// working in an ungrouped workspace is a workspace in the wrong
+		// row; a refused dispatch is work that did not happen.
+		d.note(run.ID, fmt.Sprintf("could not read the project's sidebar group: %v", err))
+	}
+	// The same label the run's pane carries, from the same function: two
+	// spellings of one name drift, and the owner reads both in one sidebar.
+	label := runs.PaneLabel(run.FeatureID, role.Key)
+	workspace, tab, root, err := d.Herdr.CreateWorkspace(ctx, cwd, label, env, focus)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create run workspace: %w", err)
+	}
+	if group != "" {
+		if err := d.Herdr.SetWorkspaceGroup(ctx, workspace.WorkspaceID, group); err != nil {
+			d.note(run.ID, fmt.Sprintf("workspace %s could not join the %q group: %v", workspace.WorkspaceID, group, err))
+		}
+	}
+	return workspace, tab, root, nil
+}
+
+// sidebarGroup is the group a run's workspace joins: the one already holding
+// the workspace whose panes run in the project root.
+//
+// Derived, never a constant. The board runs over whatever repository it was
+// opened in, and the grouping is the owner's own — on his session
+// `bugtoprompt-api` sits in a group called `bugtoprompt`, and nothing in hvb
+// may know that name.
+//
+// A project root with no workspace, or one whose workspace is in no group,
+// degrades to no group at all: the run's workspace is created at the top
+// level, where it is still visible and still works. Inventing a name instead
+// would add a sidebar folder the owner never made, which is a worse outcome
+// than a row in the wrong place.
+func (d *Dispatcher) sidebarGroup(ctx context.Context) (string, error) {
+	hostID, found, err := d.Herdr.WorkspaceForPath(ctx, d.Workspace.Root)
+	if err != nil {
+		return "", fmt.Errorf("find the project's workspace: %w", err)
+	}
+	if !found {
+		return "", nil
+	}
+	workspaces, err := d.Herdr.Workspaces(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list workspaces: %w", err)
+	}
+	for _, workspace := range workspaces {
+		if workspace.WorkspaceID == hostID {
+			return workspace.VisualGroup, nil
+		}
+	}
+	return "", nil
 }
 
 // submitPrompt sends the task, deferring it while the harness is blocked.
@@ -257,6 +398,14 @@ func (d *Dispatcher) launch(ctx context.Context, req Request, run *runs.Run, rol
 // the user's decision, and a board that clicks "yes" on their behalf would be
 // making a security choice nobody asked it to make. Instead the prompt is
 // parked on the run and Reconcile submits it once the agent settles.
+//
+// prompt is the short pointer at the run's prompt file, not the task text, so
+// run.PendingPrompt parks the pointer too. That is the point: Reconcile's
+// deferred submission (complete.go, submitPending) re-sends this exact string
+// through `agent prompt`, and parking the 11 KB body would put the collapsed
+// paste back on the one path that is hardest to notice — nobody is watching
+// when it fires. Every reader of the field only asks whether it is empty
+// (cli/run.go, tui/detail.go), so they are unaffected by which string it is.
 func (d *Dispatcher) submitPrompt(ctx context.Context, runID, agentName, prompt string, blocked bool) error {
 	if !blocked {
 		if err := d.Herdr.PromptAgent(ctx, agentName, prompt, false, 0); err != nil {
@@ -281,24 +430,13 @@ func (d *Dispatcher) submitPrompt(ctx context.Context, runID, agentName, prompt 
 	return nil
 }
 
-// resolveWorkspace finds the Herdr workspace whose panes already run in the
-// project root, creating one when none does.
-func (d *Dispatcher) resolveWorkspace(ctx context.Context) (string, error) {
-	if id, found, err := d.Herdr.WorkspaceForPath(ctx, d.Workspace.Root); err != nil {
-		return "", fmt.Errorf("find workspace: %w", err)
-	} else if found {
-		return id, nil
-	}
-	created, _, _, err := d.Herdr.CreateWorkspace(ctx, d.Workspace.Root, d.Workspace.Name(), nil, false)
-	if err != nil {
-		return "", fmt.Errorf("create workspace: %w", err)
-	}
-	return created.WorkspaceID, nil
-}
-
 // resolveTab reuses the feature's existing tab when one is open, so repeated
 // runs on a feature stay in one place. It returns the tab and an anchor pane
 // inside it that is safe to split from.
+//
+// Only the worktree path calls this: a plain run has a workspace of its own
+// and its harness occupies that workspace's root pane, so there is no tab to
+// reuse and nothing to split from.
 func (d *Dispatcher) resolveTab(ctx context.Context, workspaceID string, run *runs.Run, env map[string]string, cwd string) (tabID, anchorID string, err error) {
 	label := runs.TabLabel(run.FeatureID)
 	tabs, err := d.Herdr.Tabs(ctx, workspaceID)
@@ -328,6 +466,13 @@ func (d *Dispatcher) resolveTab(ctx context.Context, workspaceID string, run *ru
 // hosting a live agent is never chosen: `agent start` requires an available
 // shell, and splitting from a busy harness pane is how two runs end up fighting
 // over one terminal.
+//
+// The split at the end of this function stays. It is not the misplacement the
+// workspace path fixed: it never decides which workspace a run lands in — the
+// worktree's linked workspace already did that — and it only fires when every
+// pane in the feature's own tab is occupied, which is the second run of a
+// feature inside its own checkout. What it produces is a plain shell to launch
+// from, in the tab the run already belongs to.
 func (d *Dispatcher) anchorInTab(ctx context.Context, tabID string, run *runs.Run, env map[string]string, cwd string) (string, error) {
 	panes, err := d.Herdr.Panes(ctx, "")
 	if err != nil {
@@ -388,44 +533,101 @@ func (d *Dispatcher) releaseLock(ctx context.Context, featureID string) {
 	_ = d.VB.Release(ctx, featureID)
 }
 
-// resolveRole picks the charter this dispatch runs under, or refuses the
-// dispatch outright when the card is not an agent's to take.
+// resolveRole picks the charter this dispatch runs under. The second result
+// reports a human-only card: one the owner's own hands have to close, routed
+// here to the single charter written for exactly that.
 //
-// The refusal is consulted before req.Role and column.Role, which is a
+// The routing is consulted before req.Role and column.Role, which is a
 // deliberate change of precedence and not an accident of ordering.
 // roles.Suggest already decided that `hitl` beats the card's own `role:`
-// label; a flag that outranked the refusal here would make the same card
-// dispatchable or not depending on which layer answered, and that incoherence
-// is worse than either rule alone. It is not hypothetical: config.Default
-// gives the review column role = "qa", so a gate placed after the
-// explicit-role branch would be bypassed by stock configuration for every
-// `hitl` card that reaches review. The owner who means it anyway drops the
-// label, which is the same act as saying the human half is done.
+// label; a flag that outranked it here would make the same card land on an
+// implementer depending on which layer answered, and that incoherence is
+// worse than either rule alone. It is not hypothetical: config.Default gives
+// the review column role = "qa", so a branch placed after the explicit-role
+// one would be bypassed by stock configuration for every `hitl` card that
+// reaches review. The owner who means an implementer anyway drops the label,
+// which is the same act as saying the human half is done.
 //
 // roles.ErrNoCharter is not a refusal and keeps its fallback: a workspace with
 // no agents directory still dispatches under the configured role, which is
 // what roles.Load's doc promises.
-func (d *Dispatcher) resolveRole(req Request, column config.Column) (roles.Role, error) {
+func (d *Dispatcher) resolveRole(req Request, column config.Column) (roles.Role, bool, error) {
 	suggested, err := roles.Suggest(d.Roles, req.Spec, d.Config.Role)
 	if errors.Is(err, roles.ErrHumanOnly) {
-		return roles.Role{}, err
+		role, routeErr := d.unblocker(err)
+		return role, true, routeErr
 	}
 	for _, want := range []string{req.Role, column.Role} {
 		if want == "" {
 			continue
 		}
 		if role, found := roles.Find(d.Roles, want); found {
-			return role, nil
+			return role, false, nil
 		}
 	}
 	if err != nil {
-		return roles.Role{Key: d.Config.Role, Name: d.Config.Role}, nil
+		return roles.Role{Key: d.Config.Role, Name: d.Config.Role}, false, nil
 	}
-	return suggested, nil
+	return suggested, false, nil
 }
 
-func (d *Dispatcher) resolveKind(req Request, column config.Column) string {
-	for _, candidate := range []string{req.Kind, column.Harness, d.Config.Harness} {
+// unblocker resolves the charter a human-only card is routed to, or repeats
+// the refusal when the workspace does not ship it.
+//
+// The missing charter degrades to a refusal and never to a default role. A
+// fallback here would re-create, by a new door, the exact defect this path
+// exists to fix: an implementer launched at a card whose whole content is
+// something only the owner can do. So the failure says which key was looked
+// for and where, which is a fixable sentence, and an operator who sets
+// HumanOnlyRole to nothing has turned the routing off and gets the plain
+// refusal back.
+func (d *Dispatcher) unblocker(refusal error) (roles.Role, error) {
+	key := strings.TrimSpace(d.Config.HumanOnlyRole)
+	if key == "" {
+		return roles.Role{}, refusal
+	}
+	if role, found := roles.Find(d.Roles, key); found {
+		return role, nil
+	}
+	return roles.Role{}, fmt.Errorf("%w; it routes to the %q charter, which this workspace does not ship — write %s in %s",
+		refusal, key, key+".md", d.chartersDir())
+}
+
+// chartersDir is the directory the loaded charters came from, which is not
+// always the workspace's own: `hvb queue --charters <dir>` points a board at a
+// vault's agents directory while it works in a different repository
+// (cli/queue.go:276-292). Deriving it from a charter that did load keeps the
+// refusal's "write it here" pointing at the directory hvb actually reads,
+// instead of one it would only read in the other configuration.
+func (d *Dispatcher) chartersDir() string {
+	for _, role := range d.Roles {
+		if role.Path != "" {
+			return filepath.Dir(role.Path)
+		}
+	}
+	return d.Workspace.AgentsDir()
+}
+
+// resolveKind picks the harness. humanOnly comes from resolveRole and moves
+// the configured unblocker harness in ahead of the column and the global
+// default, because both of those describe ordinary work: the Blocked column a
+// `hitl` card lands in (fila.ColumnFor) also holds every card the frontier
+// blocked, and config.Default already proves stock configuration injects
+// per-column values with nobody typing a flag — it gives the review column
+// role = "qa". A per-column harness would therefore decide the harness for a
+// card that is only passing through that column.
+//
+// req.Kind still wins. It is a human typing --harness at this dispatch, the
+// most explicit statement there is about which program runs, and silently
+// ignoring it would make the flag a lie. Nothing about the invariant depends
+// on it: the charter is what must never be an implementer's, and that is
+// decided in resolveRole, where no flag gets past.
+func (d *Dispatcher) resolveKind(req Request, column config.Column, humanOnly bool) string {
+	candidates := []string{req.Kind, column.Harness, d.Config.Harness}
+	if humanOnly {
+		candidates = []string{req.Kind, d.Config.HumanOnlyHarness, column.Harness, d.Config.Harness}
+	}
+	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate) != "" {
 			return strings.TrimSpace(candidate)
 		}

@@ -66,6 +66,13 @@ type App struct {
 }
 
 // Resolve loads everything a board command needs. It is idempotent.
+//
+// It does NOT ask ValidateSpecBoard. That gate belongs to the spec board
+// alone, and asking it here refused every command in a workspace whose
+// `[workflow] columns` declares a queue line: `hvb role list`, `hvb run list`
+// and `hvb doctor` have no opinion about which columns vb can move a spec
+// into, and a queue line is a legal thing to configure. ResolveSpecBoard is
+// the path that asks.
 func (a *App) Resolve() error {
 	if a.workspace != nil {
 		return nil
@@ -90,13 +97,6 @@ func (a *App) Resolve() error {
 	if err != nil {
 		return err
 	}
-	// The spec board is vb's, so its columns and routes have to be vb's
-	// too. Load cannot ask this — `hvb queue` renders a declared line vb
-	// has never heard of, and refusing it there would make a queue board
-	// impossible to configure — so the path that holds a workspace asks.
-	if err := cfg.ValidateSpecBoard(); err != nil {
-		return err
-	}
 	store, err := runs.Open(resolved.ID())
 	if err != nil {
 		return err
@@ -111,6 +111,25 @@ func (a *App) Resolve() error {
 	a.workspace, a.config, a.store, a.roles, a.herdr = resolved, cfg, store, loadedRoles, herdr
 	a.vb = vb.New(resolved.Root)
 	return nil
+}
+
+// ResolveSpecBoard is Resolve for a command that draws the spec board: the
+// same runtime, plus the vb-authority gate.
+//
+// The spec board is vb's, so its columns and routes have to be vb's too. Load
+// cannot ask this — `hvb queue` renders a declared line vb has never heard of,
+// and refusing it there would make a queue board impossible to configure — and
+// neither can Resolve, which every workspace command shares. The board that
+// renders those columns asks.
+//
+// The gate is re-asked on every call rather than remembered: Resolve is
+// idempotent because reloading is wasted work, while validating a loaded
+// config is a pure function of it and costs nothing to repeat.
+func (a *App) ResolveSpecBoard() error {
+	if err := a.Resolve(); err != nil {
+		return err
+	}
+	return a.config.ValidateSpecBoard()
 }
 
 // Workspace returns the resolved workspace.

@@ -21,8 +21,11 @@
 // read, so a stale entry here can never outvote the repository.
 //
 // The on-disk mechanics are copied from internal/runs/store.go rather than
-// invented: a versioned document, atomic replacement, an exclusive-create lock
-// file, a file from the future discarded, a corrupt file starting clean.
+// invented: a versioned document, atomic replacement, a lock file, a file from
+// the future discarded, a corrupt file starting clean. The lock is the one
+// place this package deliberately does NOT copy it: internal/runs takes its
+// lock by exclusive-create and reclaims one that looks old, which cannot tell
+// a crashed writer from a slow one; lockFile here asks the kernel instead.
 // internal/runs is not imported — Open takes the data directory — so the
 // env-var chain ($HVB_DATA_DIR, $XDG_DATA_HOME, ~/.local/share) keeps exactly
 // one definition and this package cannot drift out of step with it.
@@ -39,6 +42,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -280,37 +284,66 @@ func (s *Store) save(doc *document) error {
 	return nil
 }
 
-// lockFile takes a cross-process advisory lock by exclusive-create, retrying
-// briefly. Every writer holds it for a single read-modify-write, so waiting is
-// short; a lock older than lockStale is treated as abandoned.
+// lockFile takes a cross-process exclusive lock on the store through flock(2),
+// retrying briefly. Every writer holds it for a single read-modify-write, so
+// waiting is short.
+//
+// flock rather than the exclusive-create-plus-age heuristic internal/runs uses:
+// an age check is a guess about whether the holder is still alive, and the
+// guess loses a move when it is wrong. A writer descheduled past the staleness
+// window — a laptop asleep, a machine under load, a debugger stopped at a
+// breakpoint — would watch a second writer delete its live lock, both would
+// read the same document, and whichever renamed last would publish a snapshot
+// taken before the other's move. flock has no such window: the kernel holds
+// the lock for exactly as long as the owning descriptor is open, so no lease
+// can be reclaimed while its owner lives, and crash recovery — the only thing
+// the age check bought — comes for free, because a dead process's descriptors
+// are closed for it.
+//
+// The lock file is created and kept, never removed: unlinking it would let a
+// waiter hold a lock on an unlinked inode while a third writer creates a fresh
+// file and locks that instead, which is the same two-writers bug by another
+// route. An empty `<board>.json.lock` left behind costs nothing and locks
+// nobody out.
 func (s *Store) lockFile() (func(), error) {
 	path := s.path + ".lock"
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("lock column store: %w", err)
+	}
 	deadline := time.Now().Add(lockWait)
 	for {
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			fmt.Fprintf(file, "%d\n", os.Getpid())
+			// The pid is a diagnostic, not the lock: it tells whoever
+			// finds a board wedged which process to look at. Written
+			// under the lock, so two writers cannot interleave it.
+			if truncErr := file.Truncate(0); truncErr == nil {
+				fmt.Fprintf(file, "%d\n", os.Getpid())
+			}
+			return func() {
+				// Closing releases the lock too; unlocking first
+				// keeps the release explicit rather than a side
+				// effect a later edit could drop.
+				_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+				file.Close()
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			file.Close()
-			return func() { os.Remove(path) }, nil
-		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("lock column store: %w", err)
-		}
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > lockStale {
-			os.Remove(path)
-			continue
+			return nil, fmt.Errorf("lock column store %s: %w", path, err)
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("lock column store: %s held for over %s (delete it if no hvb is running)", path, lockWait)
+			file.Close()
+			return nil, fmt.Errorf("lock column store: %s held for over %s by another hvb (`lsof %s` names it)", path, lockWait, path)
 		}
 		time.Sleep(lockPoll)
 	}
 }
 
 const (
-	lockWait  = 5 * time.Second
-	lockPoll  = 20 * time.Millisecond
-	lockStale = 60 * time.Second
+	lockWait = 5 * time.Second
+	lockPoll = 20 * time.Millisecond
 )
 
 func sortEntries(entries []Entry) {

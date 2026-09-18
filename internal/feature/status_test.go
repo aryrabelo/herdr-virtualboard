@@ -97,6 +97,27 @@ func TestNextIsInBoardOrder(t *testing.T) {
 	}
 }
 
+// VB() is one table for the whole process, and Next hands a caller the row a
+// move picker renders. A caller that sorted, filtered or overwrote that row in
+// place would be editing what vb allows for every later reader — the board
+// would grey out a legal move, or offer an illegal one, for the rest of the
+// run. The mutation below is what a picker doing its own ordering looks like.
+func TestNextCannotRewriteTheSharedTransitionTable(t *testing.T) {
+	handed := VB().Next(InProgress)
+	if len(handed) != 2 {
+		t.Fatalf("VB().Next(in-progress) = %v; want two destinations", handed)
+	}
+	handed[0] = "done"
+
+	again := VB().Next(InProgress)
+	if again[0] != Blocked || again[1] != Review {
+		t.Fatalf("VB().Next(in-progress) = %v after a caller wrote to the slice it was handed; want [blocked review]", again)
+	}
+	if VB().CanTransition(InProgress, Done) {
+		t.Fatal("in-progress → done became legal because a caller wrote to the slice Next handed it")
+	}
+}
+
 func TestDirMatchesVirtualBoardLayout(t *testing.T) {
 	if got := InProgress.Dir(); got != "features/in-progress" {
 		t.Fatalf("InProgress.Dir() = %q; want features/in-progress", got)

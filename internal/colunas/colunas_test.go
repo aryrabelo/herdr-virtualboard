@@ -1,11 +1,16 @@
 package colunas
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -283,4 +288,147 @@ func TestConcurrentSetsDoNotLoseEachOther(t *testing.T) {
 	if len(entries) != len(ids) {
 		t.Fatalf("got %d entries after %d concurrent writes, want %d", len(entries), len(ids), len(ids))
 	}
+}
+
+// A writer that died — killed, panicked, the machine cut — leaves its lock
+// file behind with a fresh mtime and nothing holding it. Waiting for that file
+// to look old before touching it makes the board unwritable for the length of
+// the staleness window; asking the kernel who holds it answers immediately.
+func TestALockLeftByADeadWriterIsTakenImmediately(t *testing.T) {
+	store := openStore(t, t.TempDir(), BoardID("repo"))
+	lock := store.Path() + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The pid of a process that is not there, and a mtime of right now:
+	// the file is indistinguishable from a live lock by inspection alone.
+	if err := os.WriteFile(lock, []byte("4194303\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- store.Set(Entry{ID: "card-dead", Column: "triage"}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Set over a lock nobody holds: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a lock file no process holds blocked a writer: crash recovery must not wait for the file to look old")
+	}
+
+	columns, err := store.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if columns["card-dead"] != "triage" {
+		t.Fatalf("column for card-dead = %q, want triage", columns["card-dead"])
+	}
+}
+
+// The other half, and the bug: a writer suspended after taking the lock — a
+// sleeping laptop, a loaded machine, a debugger stopped at a breakpoint — used
+// to have its LIVE lock deleted by the next writer the moment the file looked
+// old enough, and the two then read the same document and raced to rename
+// their snapshots over each other, losing a move. A lease the kernel owns
+// cannot be reclaimed while its owner lives, however old the file looks.
+func TestALiveLockIsNotReclaimedHoweverOldItLooks(t *testing.T) {
+	store := openStore(t, t.TempDir(), BoardID("repo"))
+	lock := store.Path() + ".lock"
+	release := holdLockInAnotherProcess(t, lock)
+
+	// Aged well past any staleness window a reader could invent.
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- store.Set(Entry{ID: "card-live", Column: "triage"}) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Set went through (err=%v) while another process held the lock: a stale-looking lock whose owner is alive must not be reclaimed", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Set after the holder exited: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Set never took the lock the holder released")
+	}
+}
+
+// holdLockInAnotherProcess starts a child holding an exclusive lock on path and
+// returns the function that makes it let go. It has to be another PROCESS: an
+// flock belongs to an open file description, so a second descriptor opened here
+// would be granted the same lock and prove nothing about a foreign holder.
+func holdLockInAnotherProcess(t *testing.T, path string) func() {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsTheColumnLock$")
+	cmd.Env = append(os.Environ(), holdLockEnv+"="+path)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		// Closing stdin is the signal; the kernel drops the lock when
+		// the child's descriptors close with it.
+		stdin.Close()
+		_ = cmd.Wait()
+	}
+	t.Cleanup(release)
+
+	reader := bufio.NewReader(stdout)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			release()
+			t.Fatalf("the child never reported holding %s: %v", path, err)
+		}
+		if strings.Contains(line, holdLockReady) {
+			return release
+		}
+	}
+}
+
+const (
+	holdLockEnv   = "HVB_TEST_HOLD_COLUMN_LOCK"
+	holdLockReady = "column-lock-held"
+)
+
+// TestHelperHoldsTheColumnLock is not a test of its own: it is the child half
+// of TestALiveLockIsNotReclaimedHoweverOldItLooks, re-executed from the test
+// binary because that is the only process this package can start.
+func TestHelperHoldsTheColumnLock(t *testing.T) {
+	path := os.Getenv(holdLockEnv)
+	if path == "" {
+		t.Skip("child half of TestALiveLockIsNotReclaimedHoweverOldItLooks")
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println(holdLockReady)
+	// Hold it until the parent closes stdin.
+	_, _ = io.Copy(io.Discard, os.Stdin)
 }

@@ -144,16 +144,31 @@ func excerpt(stdout []byte) string {
 // hyphens. So the slug is derived from the title instead of asking the owner to
 // type one, and a title that reduces to nothing falls back to issue-<number>,
 // which is still a name a worktree can carry.
+//
+// The number is part of the name rather than decoration on it. The usina
+// derives BOTH the checkout and the branch from the unit (measured in
+// usina/verbos/agente.py: `worktrees/<repo>/<unidade>` and `agente/<unidade>`),
+// so two cards titled the same way — or titled differently only past the cut —
+// would dispatch the second agent into the first card's worktree. The number
+// takes its bytes out of the title's budget rather than out of the limit, so
+// the name stays as short as it was.
 func Unidade(title string, number int) string {
-	if slug := cutAtWord(asciiSlug(title)); slug != "" {
-		return slug
+	// A non-positive number is absence, not issue 0: there is nothing to
+	// disambiguate with, and a "-0" tail would name a card that cannot exist.
+	suffix := ""
+	if number > 0 {
+		suffix = "-" + strconv.Itoa(number)
+	}
+	if slug := cutAtWord(asciiSlug(title), unidadeMax-len(suffix)); slug != "" {
+		return slug + suffix
 	}
 	return "issue-" + strconv.Itoa(number)
 }
 
-// unidadeMax is how many characters of the title survive. A unit name becomes a
-// directory name and a branch name, so it is kept short enough to read in a
-// `git branch` listing next to the `agente/` prefix.
+// unidadeMax is how many characters of the whole unit name survive — the title
+// and the issue number together. A unit name becomes a directory name and a
+// branch name, so it is kept short enough to read in a `git branch` listing
+// next to the `agente/` prefix.
 const unidadeMax = 48
 
 // asciiSlug reduces a title to lowercase ASCII words joined by single hyphens.
@@ -189,19 +204,26 @@ func asciiSlug(title string) string {
 	return slug.String()
 }
 
-// cutAtWord shortens a slug to unidadeMax without splitting a word. Byte
+// cutAtWord shortens a slug to max bytes without splitting a word. Byte
 // indexing is safe because asciiSlug produced the string and it is ASCII.
 //
 // A single word longer than the limit has no boundary to back off to, and is
 // cut hard: degrade rather than refuse (AGENTS.md) — a truncated name still
 // identifies the worktree, while falling back to issue-<N> would throw away a
 // title the owner can read.
-func cutAtWord(slug string) string {
-	if len(slug) <= unidadeMax {
+//
+// A max the issue number has already eaten leaves no room for a title, and the
+// empty answer is what sends Unidade to its issue-<N> name rather than to a
+// slice of a string that is shorter than the index.
+func cutAtWord(slug string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(slug) <= max {
 		return slug
 	}
-	head := slug[:unidadeMax]
-	if slug[unidadeMax] == '-' {
+	head := slug[:max]
+	if slug[max] == '-' {
 		return head // the cut already landed on a word boundary
 	}
 	if boundary := strings.LastIndexByte(head, '-'); boundary > 0 {

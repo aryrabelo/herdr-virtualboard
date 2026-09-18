@@ -7,9 +7,10 @@ import (
 
 // dispatchBody is the shape the usina prints, taken from the
 // `.usina-despacho.json` this worktree was dispatched with (measured
-// 2026-09-17) plus the `outcome` and `dry_run` keys the contract lists. The
-// extra keys the real file carries are kept on purpose: they must be ignored,
-// not decoded.
+// 2026-09-17) plus the `outcome` key the contract lists. `dry_run` is absent on
+// purpose — a real dispatch does not print it, and TestDispatchArgvWithIssue
+// reads that absence as false. The extra keys the real file carries are kept on
+// purpose too: they must be ignored, not decoded.
 const dispatchBody = `{"unidade": "linha-de-producao", "repo": "aryrabelo/herdr-virtualboard", ` +
 	`"issue": "321", "workspace": "wFX", "pane": "wFX:p1", ` +
 	`"worktree": "/Users/aryrabelo/Sites/bora-team/worktrees/herdr-virtualboard/linha-de-producao", ` +
@@ -132,17 +133,18 @@ func TestDispatchDryRunTravelsAndWaivesThePromptFile(t *testing.T) {
 
 func TestUnidadeFoldsAccentsCollapsesAndCutsAtWord(t *testing.T) {
 	// The measured case: the title of ceo-bora#321, whose worktree the owner
-	// named `linha-de-producao`.
-	if got := Unidade("linha de produção do hvb", 321); got != "linha-de-producao-do-hvb" {
-		t.Errorf("Unidade(titulo medido) = %q, esperado linha-de-producao-do-hvb", got)
+	// named `linha-de-producao`. The issue number is the tail, so the name
+	// still reads title-first in a `git branch` listing.
+	if got := Unidade("linha de produção do hvb", 321); got != "linha-de-producao-do-hvb-321" {
+		t.Errorf("Unidade(titulo medido) = %q, esperado linha-de-producao-do-hvb-321", got)
 	}
 	// Decomposed input folds the same way, so a title pasted from a source that
 	// normalises differently does not produce a second worktree name.
-	if got := Unidade("linha de produc\u0327a\u0303o do hvb", 321); got != "linha-de-producao-do-hvb" {
-		t.Errorf("Unidade(titulo decomposto) = %q, esperado linha-de-producao-do-hvb", got)
+	if got := Unidade("linha de produc\u0327a\u0303o do hvb", 321); got != "linha-de-producao-do-hvb-321" {
+		t.Errorf("Unidade(titulo decomposto) = %q, esperado linha-de-producao-do-hvb-321", got)
 	}
-	if got := Unidade("  HVB: Ready, To --- Review!  ", 7); got != "hvb-ready-to-review" {
-		t.Errorf("Unidade(pontuacao colapsada) = %q, esperado hvb-ready-to-review", got)
+	if got := Unidade("  HVB: Ready, To --- Review!  ", 7); got != "hvb-ready-to-review-7" {
+		t.Errorf("Unidade(pontuacao colapsada) = %q, esperado hvb-ready-to-review-7", got)
 	}
 	if got := Unidade("--- ??? !!! ---", 42); got != "issue-42" {
 		t.Errorf("Unidade(so pontuacao) = %q, esperado issue-42", got)
@@ -158,8 +160,50 @@ func TestUnidadeFoldsAccentsCollapsesAndCutsAtWord(t *testing.T) {
 	if strings.HasSuffix(long, "-") {
 		t.Errorf("Unidade(titulo longo) = %q termina em hifen", long)
 	}
-	if got := "a-linha-de-producao-do-hvb-passa-a-ler-a-fila"; long != got {
+	// The number comes out of the title's budget, not out of the limit: the
+	// title is cut one word earlier than it used to be and the name is no
+	// longer than before.
+	if got := "a-linha-de-producao-do-hvb-passa-a-ler-a-321"; long != got {
 		t.Errorf("Unidade(titulo longo) = %q, esperado %q (corte na palavra inteira)", long, got)
+	}
+}
+
+// Two cards derive two units. The usina resolves BOTH the worktree
+// (`worktrees/<repo>/<unidade>`) and the branch (`agente/<unidade>`) from the
+// unit, so a unit shared by two cards dispatches the second agent into the
+// first card's checkout — which is why the issue number is part of the name.
+func TestUnidadeKeepsTwoCardsApartInsideTheLengthBudget(t *testing.T) {
+	title := "ligar o board na linha"
+	first, second := Unidade(title, 321), Unidade(title, 322)
+	if first == second {
+		t.Fatalf("as issues 321 e 322 derivaram a mesma unidade %q: o segundo despacho cairia na worktree do primeiro", first)
+	}
+	if !strings.HasSuffix(first, "-321") {
+		t.Errorf("Unidade(%q, 321) = %q: o numero da issue nao aparece no nome", title, first)
+	}
+
+	// Titles that agree on their first 48 characters and differ only after the
+	// cut are the harder case: the slug alone cannot tell them apart.
+	head := "a linha de producao do hvb passa a ler a fila real do dono sem adivinhar"
+	long, longer := Unidade(head+" agora", 11), Unidade(head+" depois", 12)
+	if long == longer {
+		t.Fatalf("dois titulos que só diferem depois do corte derivaram a mesma unidade %q", long)
+	}
+
+	// And every one of them still fits the budget a branch name has.
+	for _, got := range []string{first, second, long, longer} {
+		if len(got) > unidadeMax {
+			t.Errorf("unidade %q tem %d caracteres, maximo %d", got, len(got), unidadeMax)
+		}
+		if strings.HasSuffix(got, "-") || strings.Contains(got, "--") {
+			t.Errorf("unidade %q nao e um slug: hifen sobrando", got)
+		}
+	}
+
+	// A number the card does not have adds no tail: "-0" would name an issue
+	// that cannot exist.
+	if got := Unidade(title, 0); got != "ligar-o-board-na-linha" {
+		t.Errorf("Unidade(%q, 0) = %q, esperado o slug sem cauda", title, got)
 	}
 }
 

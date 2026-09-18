@@ -303,7 +303,6 @@ func queueLine(cfg *config.Config, wf *feature.Workflow, prRepo, issuesRepo, dis
 		line.Issues = &usinaDespatcher{
 			run:  usinasrc.Runner(issuesrc.DirRunner(from)),
 			repo: dispatchRepo,
-			dir:  from,
 		}
 	}
 	return line, nil

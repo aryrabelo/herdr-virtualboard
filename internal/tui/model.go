@@ -79,6 +79,15 @@ type Model struct {
 
 	// columns holds the cards per column, in board order.
 	columns map[feature.Status][]*Card
+	// undeclared are the columns cards actually arrived in that the
+	// workflow never declared, in a stable order. Every reader of the board
+	// walks columnOrder, so a status missing from it is a card the board
+	// holds and draws nowhere — a non-empty queue reporting itself empty.
+	// They are therefore drawn after the declared columns and named in the
+	// problems list: the line a repository declared is likelier to be wrong
+	// than the forge the card came from, and either way the reader can see
+	// the card. Recomputed by Reload, the only thing that can change them.
+	undeclared []feature.Status
 	// column and card are the focused positions.
 	column int
 	card   map[feature.Status]int
@@ -92,11 +101,12 @@ type Model struct {
 	// nothing look identical — and only the command that opened it knows
 	// where the work would otherwise live.
 	emptyHint string
-	// focusColumn is the column the caller wants the first load to open
-	// on, or "" for wherever the work is. Only the command knows: `hvb
-	// queue --focus-column ready-to-review` is a board opened to answer
-	// one question rather than a board to browse.
-	focusColumn feature.Status
+	// focusColumn is the column name the caller wants the first load to
+	// open on, or "" for wherever the work is. Only the command knows:
+	// `hvb queue --focus-column ready-to-review` is a board opened to
+	// answer one question rather than a board to browse. It is the raw
+	// request, resolved through the workflow's own parser at load time.
+	focusColumn string
 
 	detailScroll  int
 	detailSection int
@@ -128,11 +138,20 @@ func NewModel(backend Backend, palette Palette) *Model {
 }
 
 // columnOrder is the board's columns, left to right: the workflow's own, minus
-// any column declared hidden while empty.
+// any column declared hidden while empty, plus any column cards arrived in
+// that the workflow never declared.
 //
 // The hidden-while-empty column is the cancelled tail. A board over a
 // VirtualBoard workspace, where no card is ever cancelled, looks exactly as it
 // did before the column existed.
+//
+// The undeclared tail is the opposite case and the reason this is the board's
+// only column order: a source answers with the column IT derived, and a
+// declared line need not have it — the twelve-column line of ceo-bora#321 has
+// no `blocked`, which internal/fios mints. Every reader here walks this slice,
+// so leaving that status out drew none of its cards and let a queue with work
+// in it report itself empty. Drawn last, and Reload also files a problem
+// naming the missing column.
 func (m *Model) columnOrder() []feature.Status {
 	declared := m.workflow.Columns()
 	hidden := 0
@@ -141,17 +160,50 @@ func (m *Model) columnOrder() []feature.Status {
 			hidden++
 		}
 	}
-	if hidden == 0 {
+	if hidden == 0 && len(m.undeclared) == 0 {
 		return declared
 	}
-	order := make([]feature.Status, 0, len(declared)-hidden)
+	// Built fresh rather than appended to: `declared` is the workflow's own
+	// slice, and appending into its spare capacity would rewrite the line
+	// every board in the process draws.
+	order := make([]feature.Status, 0, len(declared)-hidden+len(m.undeclared))
 	for _, status := range declared {
 		if m.workflow.HideWhenEmpty(status) && len(m.columns[status]) == 0 {
 			continue
 		}
 		order = append(order, status)
 	}
-	return order
+	return append(order, m.undeclared...)
+}
+
+// undeclaredColumns are the columns holding cards that the workflow does not
+// declare, sorted so two loads of the same board draw them in the same order.
+func (m *Model) undeclaredColumns() []feature.Status {
+	var extra []feature.Status
+	for status, cards := range m.columns {
+		if len(cards) == 0 || m.workflow.Has(status) {
+			continue
+		}
+		extra = append(extra, status)
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i] < extra[j] })
+	return extra
+}
+
+// undeclaredProblems is one problem per undeclared column. The cards draw
+// either way — columnOrder says why — but a column nobody declared is a
+// configuration error, and the board is where it becomes visible.
+func (m *Model) undeclaredProblems() []error {
+	if len(m.undeclared) == 0 {
+		return nil
+	}
+	out := make([]error, 0, len(m.undeclared))
+	for _, status := range m.undeclared {
+		out = append(out, fmt.Errorf(
+			"%d card(s) arrived in %q, which the line does not declare: the board draws that column after the declared ones so none of them is lost — add %q to `[workflow] columns`, or fix the source reporting it",
+			len(m.columns[status]), status, status))
+	}
+	return out
 }
 
 // Resize records new terminal geometry.
@@ -171,7 +223,6 @@ func (m *Model) Reload(ctx context.Context) {
 	}
 
 	specs, allRuns, problems := m.backend.Load(ctx)
-	m.problems = problems
 
 	runsByFeature := map[string][]*runs.Run{}
 	for _, run := range allRuns {
@@ -190,6 +241,8 @@ func (m *Model) Reload(ctx context.Context) {
 		columns[spec.Status] = append(columns[spec.Status], card)
 	}
 	m.columns = columns
+	m.undeclared = m.undeclaredColumns()
+	m.problems = append(problems, m.undeclaredProblems()...)
 	first := m.lastLoad.IsZero()
 	m.lastLoad = time.Now()
 
@@ -203,17 +256,29 @@ func (m *Model) Reload(ctx context.Context) {
 		// an empty backlog while every card is in review makes the user
 		// navigate before the board tells them anything, so start where
 		// the work is.
-		if m.focusColumn == "" || !m.focusColumnNamed(m.focusColumn) {
+		if !m.focusColumnNamed(m.focusColumn) {
 			m.focusFirstPopulatedColumn()
 		}
 	}
 }
 
-// focusColumnNamed moves the selection to a column by name, reporting whether
-// the board draws it. A column the workflow does not declare — or one hidden
-// because it is empty — is not an error: the caller asked for a place to open
-// and the board falls back to where the work is.
-func (m *Model) focusColumnNamed(status feature.Status) bool {
+// focusColumnNamed moves the selection to the column the caller named,
+// reporting whether the board draws it. A column the workflow does not declare
+// — or one hidden because it is empty — is not an error: the caller asked for a
+// place to open and the board falls back to where the work is.
+//
+// The name is resolved through the workflow's own parser rather than compared
+// raw. `--focus-column` carries whatever the shell or the keybinding had, and
+// every other column name in hvb accepts `ready_to_review` and
+// `Ready-To-Review` for `ready-to-review`; comparing the raw text made those
+// spellings fall back silently, which on screen is indistinguishable from a
+// line that does not declare the column at all. An empty request parses as no
+// column, which is what "open wherever the work is" already meant.
+func (m *Model) focusColumnNamed(name string) bool {
+	status, ok := m.workflow.Parse(name)
+	if !ok {
+		return false
+	}
 	for index, candidate := range m.columnOrder() {
 		if candidate == status {
 			m.column = index

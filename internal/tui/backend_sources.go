@@ -159,11 +159,16 @@ type SourceBackend struct {
 	// what lets Move refuse a write the next Load would overrule, and numbers
 	// is the issue number read off the card's own label — an id is an opaque
 	// string a source may mint from a hash, so it is never parsed for one.
+	// repos is the repository each card is charged to, measured the same way
+	// resolveColumns picks its quiet window: a stored entry says which
+	// repository it belongs to, and a pull request's is not the issue
+	// queue's whenever the board reads two of them.
 	mu       sync.Mutex
 	origins  map[string]string
 	kinds    []string
 	verdicts map[string]linha.Verdict
 	numbers  map[string]int
+	repos    map[string]string
 }
 
 // WithLine turns a sources board into a production line. It is a separate step
@@ -270,18 +275,25 @@ func (b *SourceBackend) Load(ctx context.Context) ([]*feature.Spec, []*runs.Run,
 
 	origins := make(map[string]string, len(specs))
 	numbers := make(map[string]int, len(specs))
+	repos := make(map[string]string, len(specs))
 	var kinds []string
 	for _, spec := range specs {
 		origins[spec.ID] = describeOrigin(spec)
 		if number := issueNumber(spec); number > 0 {
 			numbers[spec.ID] = number
 		}
+		// Read off the labels, exactly as resolveColumns reads them for
+		// the quiet window: a card's repository is a property of the
+		// source that built it, and Move only ever gets an id back.
+		if b.line != nil {
+			repos[spec.ID] = b.line.repoOf(spec)
+		}
 		if kind := sourceKind(spec); kind != "" && !contains(kinds, kind) {
 			kinds = append(kinds, kind)
 		}
 	}
 	b.mu.Lock()
-	b.origins, b.kinds, b.verdicts, b.numbers = origins, kinds, verdicts, numbers
+	b.origins, b.kinds, b.verdicts, b.numbers, b.repos = origins, kinds, verdicts, numbers, repos
 	b.mu.Unlock()
 
 	// Runs come from the dispatcher's own store. A read-only board records
@@ -380,11 +392,14 @@ func appendColumnReason(body string, verdict linha.Verdict) string {
 // Move records a card's column in hvb's own store, or refuses and names who
 // owns the answer instead.
 //
-// Four refusals, and each one is a different mistake:
+// Five refusals, and each one is a different mistake:
 //
 //   - no line at all: every column comes from a file with its own author,
 //     which is the board `hvb queue` has always been;
 //   - a column the line does not draw: the answer would be unreachable;
+//   - a card the last Load did not produce: there is no column to move it
+//     FROM, so the transition check has nothing to check and the entry would
+//     be a column for an id no board ever showed;
 //   - a column a fact decides: the next Load would overrule the write, so
 //     storing it is a lie with a timestamp on it;
 //   - a transition the line does not declare: the picker greys those out, but
@@ -408,12 +423,21 @@ func (b *SourceBackend) Move(_ context.Context, id string, target feature.Status
 	b.mu.Lock()
 	verdict, known := b.verdicts[id]
 	number := b.numbers[id]
+	repo := b.repos[id]
 	b.mu.Unlock()
+	if !known {
+		// The old code let this through: with no verdict there was no
+		// column to transition from, so the two checks below were both
+		// skipped and the store recorded a move the line had never
+		// allowed, for a card that may not exist at all.
+		return fmt.Errorf("the board cannot move %s to %s: no card with that id was on the last refresh, so the line has no column to move it from (press r to refresh, and check the id)",
+			id, target)
+	}
 	switch {
-	case known && verdict.Pinned:
+	case verdict.Pinned:
 		return fmt.Errorf("the board cannot move %s to %s: a measured fact holds it in %s (%s), and the next refresh would overrule the move",
 			id, target, verdict.Column, verdict.Reason)
-	case known && !b.workflow.CanTransition(verdict.Column, target):
+	case !b.workflow.CanTransition(verdict.Column, target):
 		return fmt.Errorf("the line does not allow %s → %s (from %s you may move to: %s)",
 			verdict.Column, target, verdict.Column, statusList(b.workflow.Next(verdict.Column)))
 	}
@@ -422,8 +446,12 @@ func (b *SourceBackend) Move(_ context.Context, id string, target feature.Status
 			id, target, ErrReadOnly)
 	}
 	return b.line.Store.Set(colunas.Entry{
-		ID:     id,
-		Repo:   b.line.IssueRepo,
+		ID: id,
+		// The card's OWN repository, not the issue queue's: a board
+		// reading pull requests from one repository and issues from
+		// another would otherwise file every stored pull request under
+		// the issue repo, and `hvb state show` joins on that field.
+		Repo:   repo,
 		Issue:  number,
 		Column: string(target),
 		SetBy:  b.owner,

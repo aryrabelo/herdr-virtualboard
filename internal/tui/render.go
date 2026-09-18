@@ -52,25 +52,71 @@ func (m *Model) renderHeader() string {
 	}
 	left := paint(m.palette.Bold, " VirtualBoard ") + paint(m.palette.Accent, m.backend.ProjectName())
 
-	var segments []string
-	for _, status := range m.columnOrder() {
-		if counts[status] == 0 && m.compact() {
-			continue
-		}
-		segments = append(segments, paint(m.palette.Status(status, m.workflow.Index(status)),
-			fmt.Sprintf("%s %d", m.workflow.Short(status), counts[status])))
-	}
-	right := strings.Join(segments, paint(m.palette.Border, " · "))
-	if active := m.ActiveRunCount(); active > 0 {
-		right = paint(m.palette.Running, fmt.Sprintf("▶%d ", active)) + right
-	}
-	right += fmt.Sprintf("  %d", total)
-
+	// Two cells are spoken for whatever the summary says: the gap that
+	// separates the two halves, and the trailing space the header has
+	// always ended with.
+	right := m.headerSummary(counts, total, m.width-displayWidth(left)-2)
 	gap := m.width - displayWidth(left) - displayWidth(right) - 1
 	if gap < 1 {
 		return fit(left, m.width)
 	}
 	return left + strings.Repeat(" ", gap) + right + " "
+}
+
+// headerSummary is the right-hand half of the header — the live-run marker, a
+// count per drawn column, and the board total — built to fit budget cells.
+//
+// It has to fit rather than overflow, because a declared line can be twelve
+// columns long: at 80 columns the full trail is wider than the terminal, and
+// the header used to answer that by dropping the whole right-hand side, taking
+// with it the one number a reader cannot recover by looking at the board — the
+// total. So the counts are what gives way, in order: the empty columns first,
+// then whole columns from the left with `…` marking the cut. The run marker
+// and the total always survive.
+func (m *Model) headerSummary(counts map[feature.Status]int, total, budget int) string {
+	prefix := ""
+	if active := m.ActiveRunCount(); active > 0 {
+		prefix = paint(m.palette.Running, fmt.Sprintf("▶%d ", active))
+	}
+	suffix := fmt.Sprintf("  %d", total)
+	room := budget - displayWidth(prefix) - displayWidth(suffix)
+
+	separator := paint(m.palette.Border, " · ")
+	segments := m.headerCounts(counts, m.compact())
+	joined := strings.Join(segments, separator)
+	if displayWidth(joined) > room && !m.compact() {
+		// A zero is the least a reader loses: the column is on screen
+		// and visibly empty.
+		segments = m.headerCounts(counts, true)
+		joined = strings.Join(segments, separator)
+	}
+	elision := paint(m.palette.Border, "… ")
+	for displayWidth(joined) > room && len(segments) > 1 {
+		// Whole segments, never a cut through one: truncate() stops
+		// mid-string and would leave a colour open, bleeding it across
+		// the rest of the header.
+		segments = segments[1:]
+		joined = elision + strings.Join(segments, separator)
+	}
+	if displayWidth(joined) > room {
+		joined = ""
+	}
+	return prefix + joined + suffix
+}
+
+// headerCounts is one painted `SHORT n` per drawn column, optionally without
+// the empty ones.
+func (m *Model) headerCounts(counts map[feature.Status]int, skipEmpty bool) []string {
+	order := m.columnOrder()
+	segments := make([]string, 0, len(order))
+	for _, status := range order {
+		if skipEmpty && counts[status] == 0 {
+			continue
+		}
+		segments = append(segments, paint(m.palette.Status(status, m.workflow.Index(status)),
+			fmt.Sprintf("%s %d", m.workflow.Short(status), counts[status])))
+	}
+	return segments
 }
 
 func (m *Model) renderFooter() string {
@@ -228,32 +274,113 @@ func (m *Model) renderSingleColumn() []string {
 	return out
 }
 
-// renderBreadcrumb names every column the board draws, marking the focused one
+// renderBreadcrumb names the columns the board draws, marking the focused one
 // and showing `‹`/`›` when the window leaves columns off screen. It is the only
 // thing telling a user of a windowed board that the line continues.
+//
+// A trail wider than the terminal is fitted around the cursor rather than cut
+// off at the right. Twelve columns at 43 cells have room for about five
+// labels, and truncating the string lost whichever came last — which, walking
+// right, is the focused label itself and the `›` that says the line goes on.
+// Both markers and the focused label always survive; `…` stands for the labels
+// dropped from either end.
 func (m *Model) renderBreadcrumb(statuses []feature.Status, start, end int) string {
-	var crumbs []string
-	if start > 0 {
-		crumbs = append(crumbs, paint(m.palette.Border, "‹"))
+	if len(statuses) == 0 {
+		return fit("", m.width)
 	}
+	labels := make([]string, len(statuses))
+	colours := make([]string, len(statuses))
 	for index, candidate := range statuses {
-		label := " " + m.workflow.Short(candidate) + " "
+		labels[index] = " " + m.workflow.Short(candidate) + " "
 		switch {
 		case index == m.column:
-			label = paint(m.palette.Invert, label)
+			colours[index] = m.palette.Invert
 		case index < start || index >= end:
 			// Off-screen columns stay in the line but read as absent,
 			// so the trail is a map rather than a promise.
-			label = paint(m.palette.Border, label)
+			colours[index] = m.palette.Border
 		default:
-			label = paint(m.palette.Dim, label)
+			colours[index] = m.palette.Dim
 		}
-		crumbs = append(crumbs, label)
+	}
+	head, tail := "", ""
+	if start > 0 {
+		head = paint(m.palette.Border, "‹")
 	}
 	if end < len(statuses) {
-		crumbs = append(crumbs, paint(m.palette.Border, "›"))
+		tail = paint(m.palette.Border, "›")
 	}
-	return fit(strings.Join(crumbs, ""), m.width)
+	// The markers are reserved first: they are the only thing that says the
+	// window is a window, and they cost one cell each.
+	trail := m.crumbTrail(labels, colours, m.width-displayWidth(head)-displayWidth(tail))
+	return fit(head+trail+tail, m.width)
+}
+
+// crumbTrail is as many of the labels as fit in width, centred on the focused
+// one and grown outward a label at a time, with `…` where an end was dropped.
+//
+// The labels arrive unpainted, with their colours beside them, so the width
+// arithmetic is over plain text and nothing is ever cut between a colour and
+// its reset.
+func (m *Model) crumbTrail(labels, colours []string, width int) string {
+	focus := m.column
+	if focus < 0 {
+		focus = 0
+	}
+	if focus >= len(labels) {
+		focus = len(labels) - 1
+	}
+	widths := make([]int, len(labels))
+	for index, label := range labels {
+		widths[index] = displayWidth(label)
+	}
+	// cost is what drawing [first,last] takes, including the elision marks
+	// the dropped ends imply.
+	cost := func(first, last int) int {
+		total := 0
+		for index := first; index <= last; index++ {
+			total += widths[index]
+		}
+		if first > 0 {
+			total++
+		}
+		if last < len(labels)-1 {
+			total++
+		}
+		return total
+	}
+	first, last := focus, focus
+	if cost(first, last) > width {
+		// Not even the focused label fits whole. Cut, it still says where
+		// the cursor is, which an empty trail does not.
+		return paint(colours[focus], truncate(labels[focus], width))
+	}
+	for {
+		grew := false
+		if first > 0 && cost(first-1, last) <= width {
+			first--
+			grew = true
+		}
+		if last < len(labels)-1 && cost(first, last+1) <= width {
+			last++
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+	var trail strings.Builder
+	mark := paint(m.palette.Border, "…")
+	if first > 0 {
+		trail.WriteString(mark)
+	}
+	for index := first; index <= last; index++ {
+		trail.WriteString(paint(colours[index], labels[index]))
+	}
+	if last < len(labels)-1 {
+		trail.WriteString(mark)
+	}
+	return trail.String()
 }
 
 // renderColumn draws one lifecycle column into a fixed width and height.

@@ -293,6 +293,92 @@ func TestTheBoardRefusesATransitionTheLineDoesNotDeclare(t *testing.T) {
 	}
 }
 
+// An id the last refresh never produced has no column to move FROM, so the
+// transition check has nothing to check. The old code read that as nothing to
+// object to and stored the move: a column recorded for a card no board had
+// ever shown, past a lifecycle nobody had checked.
+func TestTheBoardRefusesToMoveACardItHasNotLoaded(t *testing.T) {
+	store := openColumnStore(t, t.TempDir())
+	backend, _ := lineBoard(t, store, time.Now(), &fakeSource{
+		specs: []*feature.Spec{issueCard("321", "intake")},
+	})
+	backend.Load(context.Background())
+
+	err := backend.Move(context.Background(), "ceo-bora#999", "triage", "ary")
+	if err == nil {
+		t.Fatal("the board stored a column for a card it has never loaded")
+	}
+	for _, want := range []string{"ceo-bora#999", "no card with that id", "refresh"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+	stored, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("a refused move wrote %d entries: %+v", len(stored), stored)
+	}
+
+	// The card that IS on the board still moves, or the refusal above would
+	// be a board that has stopped working rather than one that checks.
+	if err := backend.Move(context.Background(), "ceo-bora#321", "triage", "ary"); err != nil {
+		t.Fatalf("the loaded card was refused too: %v", err)
+	}
+}
+
+// A stored entry says which repository the card belongs to, and a board
+// reading pull requests from the execution repository and issues from the
+// planning one has two of them. Every stored card used to be charged to the
+// issue queue, so a pull request was filed under a repository it is not in —
+// and `hvb state show` joins on that field.
+func TestAStoredPullRequestRecordsItsOwnRepository(t *testing.T) {
+	store := openColumnStore(t, t.TempDir())
+	// No state label: no fact pins this card, so it stays where the source
+	// put it and a human's move into a column GitHub has no field for is
+	// allowed.
+	pull := prCard("164", "linha: guardar o repo certo", "building")
+	backend, _ := lineBoard(t, store, time.Now(), &fakeSource{specs: []*feature.Spec{pull}})
+	if backend.line.PRRepo == backend.line.IssueRepo {
+		t.Fatal("the two sources read the same repository, so this test cannot tell them apart")
+	}
+	backend.Load(context.Background())
+
+	if err := backend.Move(context.Background(), "PR-164", "first-review", "ary"); err != nil {
+		t.Fatalf("moving a pull request into a column no fact decides: %v", err)
+	}
+	stored, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("the store holds %d entries, want 1", len(stored))
+	}
+	if stored[0].Repo != backend.line.PRRepo {
+		t.Errorf("the pull request is filed under %q, want its own repository %q",
+			stored[0].Repo, backend.line.PRRepo)
+	}
+
+	// And an issue card is still charged to the issue queue: the fix is
+	// reading the card's source, not swapping one hard-coded repo for
+	// another.
+	issues, _ := lineBoard(t, openColumnStore(t, t.TempDir()), time.Now(), &fakeSource{
+		specs: []*feature.Spec{issueCard("321", "intake")},
+	})
+	issues.Load(context.Background())
+	if err := issues.Move(context.Background(), "ceo-bora#321", "triage", "ary"); err != nil {
+		t.Fatalf("moving an issue: %v", err)
+	}
+	entries, err := issues.line.Store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Repo != issues.line.IssueRepo {
+		t.Errorf("the issue is filed under %+v, want %q", entries, issues.line.IssueRepo)
+	}
+}
+
 // One despatcher per card. An issue is dispatched by `usina agente dispatch`,
 // never by the run store's despatcher — which claims through vb, and vb has
 // never heard of an issue number. Checked on the backend rather than only on

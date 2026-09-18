@@ -9,6 +9,7 @@ import (
 
 	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/linha"
 	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
 
@@ -62,10 +63,40 @@ func queueWorkflow(t *testing.T) *feature.Workflow {
 	return wf
 }
 
-// canceledPR is a pull request that closed without merging, as the board
-// receives it: the column is resolved before the card arrives — the source
-// mints `hvb:state:canceled` and the line policy turns it into a column — so
-// the presentation layer is handed a card that is already in the tail.
+// queueLine is the production line `hvb queue` runs when the repository
+// declared none: the legacy tail column plus the one fact label that reaches
+// it, read out of the same configuration the binary reads. A board given this
+// classifies its own cards, which is the path production takes.
+func queueLine(t *testing.T, wf *feature.Workflow) *Line {
+	t.Helper()
+	cfg := config.Default()
+	when := map[feature.Status]string{}
+	for name, label := range cfg.LineWhen() {
+		when[feature.Status(name)] = label
+	}
+	if when[columnCanceled] == "" {
+		t.Fatalf("the default line declares no fact for %q, so nothing would classify a cancelled pull request", columnCanceled)
+	}
+	return &Line{
+		Policy:    linha.Policy{Order: wf.Columns(), When: when, Quiet: feature.Status(cfg.LineQuiet())},
+		PRRepo:    "aryrabelo/bugtoprompt",
+		IssueRepo: "aryrabelo/ceo-bora",
+	}
+}
+
+// closedPR is a pull request as the SOURCE hands it over: closed without
+// merging, still in the column internal/ghboard derived for it, carrying the
+// fact label and nothing else decided. It only reaches the tail on a board
+// with a line, so a test using it measures the classification rather than its
+// own fixture.
+func closedPR(number, title string, labels ...string) *feature.Spec {
+	return prCard(number, title, feature.Review, append([]string{LabelCanceled}, labels...)...)
+}
+
+// canceledPR is the same pull request already classified, for the boards that
+// have no line to classify it: `hvb queue --vault` reads FIOS.md, which has no
+// pull request and no policy. Anything asserting how a card GETS to the tail
+// must use closedPR and a line instead.
 func canceledPR(number, title string, labels ...string) *feature.Spec {
 	return prCard(number, title, columnCanceled, append([]string{LabelCanceled}, labels...)...)
 }
@@ -156,14 +187,29 @@ func TestMutationsAreRefusedNamingTheOwningFile(t *testing.T) {
 // A cancelled pull request is done without having landed. It must not sit in
 // Done pretending it shipped, and the user must be able to walk to it: a column
 // the cursor cannot reach is worse than no column at all.
+//
+// Built from the SOURCE's own column and classified by the line, because that
+// is the path `hvb queue` takes: handing the board a card already in the tail
+// would test the rendering of a status this file wrote itself.
 func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
+	workflow := queueWorkflow(t)
 	landed := prCard("178", "harness: fechar o gate", feature.Done, labelIssuePrefix+"167")
-	dropped := canceledPR("179", "board: abandonado", labelIssuePrefix+"168")
-	backend := NewSourceBackend("repo", nil, queueWorkflow(t), "ary", &fakeSource{
+	dropped := closedPR("179", "board: abandonado", labelIssuePrefix+"168")
+	if dropped.Status != feature.Review {
+		t.Fatalf("the fixture already arrives in %q, so the line's classification is not being measured", dropped.Status)
+	}
+	backend := NewSourceBackend("repo", nil, workflow, "ary", &fakeSource{
 		specs: []*feature.Spec{landed, dropped},
-	})
+	}).WithLine(queueLine(t, workflow))
 	model := newTestModel(t, backend, 160, 30)
 
+	// The line is what moved it, and it says so where the detail pane looks.
+	if dropped.Status != columnCanceled {
+		t.Fatalf("the line left the closed pull request in %q", dropped.Status)
+	}
+	if want := LabelCanceled; !strings.Contains(dropped.Body, want) {
+		t.Errorf("the card never says which fact put it in the tail:\n%s", dropped.Body)
+	}
 	counts := model.Counts()
 	if counts[feature.Done] != 1 {
 		t.Errorf("Done holds %d cards, want only the merged one", counts[feature.Done])
@@ -231,19 +277,29 @@ func TestBoardOpensWhereTheWorkIsEvenWhenItIsCancelled(t *testing.T) {
 // A pull request that closes unmerged while the user is looking at it changes
 // column. The cursor must follow the card, which is the whole reason Reload
 // re-finds the selection by identity instead of by index.
+//
+// Both loads go through the line, so what moves the card between them is the
+// fact the source added — the same reclassification the running board does on
+// its refresh tick.
 func TestReloadFollowsACardIntoTheCancelledColumn(t *testing.T) {
+	workflow := queueWorkflow(t)
 	open := prCard("179", "board: ler a fila real", feature.Review, labelIssuePrefix+"168")
 	source := &fakeSource{specs: []*feature.Spec{open}}
-	model := newTestModel(t, NewSourceBackend("repo", nil, queueWorkflow(t), "ary", source), 160, 30)
+	backend := NewSourceBackend("repo", nil, workflow, "ary", source).WithLine(queueLine(t, workflow))
+	model := newTestModel(t, backend, 160, 30)
 
 	if got := model.FocusedStatus(); got != feature.Review {
 		t.Fatalf("the board opened on %q, want review", got)
 	}
 
-	// The pull request is closed without merging.
-	source.specs = []*feature.Spec{canceledPR("179", "board: ler a fila real", labelIssuePrefix+"168")}
+	// The pull request is closed without merging: same source column, one
+	// new fact.
+	closed := closedPR("179", "board: ler a fila real", labelIssuePrefix+"168")
+	source.specs = []*feature.Spec{closed}
 	model.Reload(context.Background())
-
+	if closed.Status != columnCanceled {
+		t.Fatalf("the line left the closed pull request in %q", closed.Status)
+	}
 	if got := model.FocusedStatus(); got != columnCanceled {
 		t.Fatalf("the cursor stayed on %q after the card moved", got)
 	}

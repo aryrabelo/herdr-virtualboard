@@ -206,5 +206,99 @@
     "title": "wip: portoes da linha",
     "updatedAt": "2026-09-17T06:30:05Z",
     "url": "https://github.com/aryrabelo/bugtoprompt/pull/295"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "Um check obrigatório que o GitHub conhece e que nada reportou ainda.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T03:50:00Z",
+    "headRefName": "wip/check-esperado",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 294,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "StatusContext",
+        "context": "buildkite/gates",
+        "createdAt": "2026-09-17T04:00:00Z",
+        "state": "EXPECTED",
+        "targetUrl": null
+      }
+    ],
+    "title": "wip: portao obrigatorio que ninguem reportou",
+    "updatedAt": "2026-09-17T04:00:05Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/294"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "A suite passou e depois um check foi marcado STALE: o resultado nao vale mais.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T02:40:00Z",
+    "headRefName": "wip/check-obsoleto",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 293,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T03:00:00Z",
+        "conclusion": "SUCCESS",
+        "name": "lint",
+        "startedAt": "2026-09-17T02:55:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T03:10:00Z",
+        "conclusion": "STALE",
+        "name": "gates",
+        "startedAt": "2026-09-17T02:55:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      }
+    ],
+    "title": "wip: portao com resultado obsoleto",
+    "updatedAt": "2026-09-17T03:10:04Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/293"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "O runner nem subiu: STARTUP_FAILURE, com status COMPLETED.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T01:50:00Z",
+    "headRefName": "wip/runner-nao-subiu",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 292,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T02:00:00Z",
+        "conclusion": "STARTUP_FAILURE",
+        "name": "gates",
+        "startedAt": "2026-09-17T01:59:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      }
+    ],
+    "title": "wip: o runner nem subiu",
+    "updatedAt": "2026-09-17T02:00:03Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/292"
   }
 ]

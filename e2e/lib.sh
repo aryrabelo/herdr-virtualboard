@@ -227,7 +227,19 @@ STATUS
     echo '{"id":"x","result":{"type":"worktree_removed"}}'
     ;;
   *"workspace create"*)
-    echo '{"id":"x","result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}'
+    # A workspace the host has just made is never one that already exists, and
+    # a plain run's harness now occupies this root pane. The stub used to
+    # answer w1/w1:p1 — the very ids `pane list` reports for the project's own
+    # pane — so every run's pane was indistinguishable from the board's and
+    # outlived any close: reconciliation could never see one go away.
+    seq=2
+    [ -f "$state_dir/workspace_seq" ] && seq="$(cat "$state_dir/workspace_seq")"
+    printf '%s\n' "$((seq + 1))" > "$state_dir/workspace_seq"
+    ws="w$seq"
+    echo "$ws:p1 $ws:t1" >> "$state_dir/live_panes"
+    printf '%s\n' "$ws:p1" >> "$state_dir/workspace_panes"
+    printf '{"id":"x","result":{"workspace":{"workspace_id":"%s"},"tab":{"tab_id":"%s:t1","workspace_id":"%s"},"root_pane":{"pane_id":"%s:p1","tab_id":"%s:t1","workspace_id":"%s"}}}\n' \
+      "$ws" "$ws" "$ws" "$ws" "$ws" "$ws"
     ;;
   *"tab list"*)
     echo '{"id":"x","result":{"tabs":[]}}'
@@ -246,8 +258,8 @@ STATUS
       if [ -f "$state_dir/live_panes" ]; then
         while read -r pane tab; do
           [ -n "$pane" ] || continue
-          printf ',{"pane_id":"%s","tab_id":"%s","workspace_id":"w1","cwd":"%s"}' \
-            "$pane" "$tab" "${HERDR_STUB_CWD:-/nonexistent}"
+          printf ',{"pane_id":"%s","tab_id":"%s","workspace_id":"%s","cwd":"%s"}' \
+            "$pane" "$tab" "${pane%%:*}" "${HERDR_STUB_CWD:-/nonexistent}"
         done < "$state_dir/live_panes"
       fi
       printf ']}}\n'
@@ -318,3 +330,9 @@ hvb() { "$HVB" --root "$ROOT" "$@"; }
 
 vb_argv()    { cat "$STUBS/vb.argv" 2>/dev/null || true; }
 herdr_argv() { cat "$STUBS/herdr.argv" 2>/dev/null || true; }
+
+# run_pane echoes the root pane of the workspace the host most recently
+# created, which is where a plain run's harness lands. Scenarios read it from
+# the stub rather than spelling an id, because the pane a run gets depends on
+# how many workspaces the scenario has already opened.
+run_pane() { tail -1 "$STUBS/workspace_panes" 2>/dev/null || true; }

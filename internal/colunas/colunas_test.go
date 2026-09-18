@@ -335,7 +335,7 @@ func TestALockLeftByADeadWriterIsTakenImmediately(t *testing.T) {
 func TestALiveLockIsNotReclaimedHoweverOldItLooks(t *testing.T) {
 	store := openStore(t, t.TempDir(), BoardID("repo"))
 	lock := store.Path() + ".lock"
-	release := holdLockInAnotherProcess(t, lock)
+	release := holdLockInAnotherProcess(t, "^TestHelperHoldsTheColumnLock$", holdLockEnv, lock)
 
 	// Aged well past any staleness window a reader could invent.
 	old := time.Now().Add(-2 * time.Hour)
@@ -362,14 +362,19 @@ func TestALiveLockIsNotReclaimedHoweverOldItLooks(t *testing.T) {
 	}
 }
 
-// holdLockInAnotherProcess starts a child holding an exclusive lock on path and
-// returns the function that makes it let go. It has to be another PROCESS: an
-// flock belongs to an open file description, so a second descriptor opened here
-// would be granted the same lock and prove nothing about a foreign holder.
-func holdLockInAnotherProcess(t *testing.T, path string) func() {
+// holdLockInAnotherProcess starts a child holding a lock and returns the
+// function that makes it let go. runPattern names which child half to
+// re-execute and env carries what it needs to lock.
+//
+// It has to be another PROCESS: an flock belongs to an open file description,
+// so a second descriptor opened here would be granted the same lock and prove
+// nothing about a foreign holder. For the same reason a goroutine proves
+// nothing either — Store serialises its own writers on a sync.Mutex, so an
+// in-process race never reaches flock at all.
+func holdLockInAnotherProcess(t *testing.T, runPattern, env, value string) func() {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsTheColumnLock$")
-	cmd.Env = append(os.Environ(), holdLockEnv+"="+path)
+	cmd := exec.Command(os.Args[0], "-test.run="+runPattern)
+	cmd.Env = append(os.Environ(), env+"="+value)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +404,7 @@ func holdLockInAnotherProcess(t *testing.T, path string) func() {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			release()
-			t.Fatalf("the child never reported holding %s: %v", path, err)
+			t.Fatalf("the child never reported holding %s: %v", value, err)
 		}
 		if strings.Contains(line, holdLockReady) {
 			return release
@@ -408,9 +413,65 @@ func holdLockInAnotherProcess(t *testing.T, path string) func() {
 }
 
 const (
-	holdLockEnv   = "HVB_TEST_HOLD_COLUMN_LOCK"
-	holdLockReady = "column-lock-held"
+	holdLockEnv      = "HVB_TEST_HOLD_COLUMN_LOCK"
+	holdStoreLockEnv = "HVB_TEST_HOLD_STORE_LOCK"
+	holdLockReady    = "column-lock-held"
 )
+
+// TestTwoWritersCannotHoldTheStoreLockAtOnce is the one test that can see the
+// lock MODE, and it exists because nothing else could.
+//
+// TestALiveLockIsNotReclaimedHoweverOldItLooks has its child take LOCK_EX
+// directly, so it stays green even if the store itself downgraded to a shared
+// lock: the child's exclusive lock excludes a shared waiter too. And
+// TestConcurrentSetsDoNotLoseEachOther runs goroutines in one process, where
+// Store's sync.Mutex serialises every writer before flock is consulted. So
+// both pass with LOCK_SH in lockFile, which is two writers publishing over
+// each other on any real two-pane board.
+//
+// Here BOTH sides take the lock through the production path. Shared locks are
+// compatible with each other, so a downgrade lets the second one in and this
+// test is the thing that says so.
+func TestTwoWritersCannotHoldTheStoreLockAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t, dir, BoardID("repo"))
+	release := holdLockInAnotherProcess(t, "^TestHelperHoldsTheStoreLock$", holdStoreLockEnv, dir)
+	defer release()
+
+	unlock, err := store.lockFile()
+	if err == nil {
+		unlock()
+		t.Fatal("the store handed out its lock twice across processes: a second writer reads the document the first one is about to replace, and whichever renames last publishes a board missing the other's move")
+	}
+	// The refusal has to name the file, because the operator's next move is
+	// to find out who is holding it.
+	if want := store.Path() + ".lock"; !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal does not name %s: %v", want, err)
+	}
+}
+
+// TestHelperHoldsTheStoreLock is the child half of
+// TestTwoWritersCannotHoldTheStoreLockAtOnce. Unlike TestHelperHoldsTheColumnLock
+// it locks through Store.lockFile, which is the whole point: it holds exactly
+// the lock production holds, in exactly the mode production asks for.
+func TestHelperHoldsTheStoreLock(t *testing.T) {
+	dir := os.Getenv(holdStoreLockEnv)
+	if dir == "" {
+		t.Skip("child half of TestTwoWritersCannotHoldTheStoreLockAtOnce")
+	}
+	store, err := Open(dir, BoardID("repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := store.lockFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	fmt.Println(holdLockReady)
+	// Hold it until the parent closes stdin.
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
 
 // TestHelperHoldsTheColumnLock is not a test of its own: it is the child half
 // of TestALiveLockIsNotReclaimedHoweverOldItLooks, re-executed from the test

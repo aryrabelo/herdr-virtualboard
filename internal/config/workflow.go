@@ -142,8 +142,10 @@ func (c *Config) LineQuiet() string {
 //
 // Load cannot ask this, which is why it is a separate method: `hvb queue`
 // renders a declared line vb has never heard of, and refusing it at load would
-// make a queue board impossible to configure. `App.Resolve` — the `hvb tui`
-// path, and the only one holding a workspace — asks instead.
+// make a queue board impossible to configure. Nor can the resolver every
+// workspace command shares, for the same reason one level down: `hvb role
+// list` in a workspace configured for a queue board is not a spec board.
+// `App.ResolveSpecBoard` — the `hvb tui` path — asks instead.
 func (c *Config) ValidateSpecBoard() error {
 	vb := feature.VB()
 	for _, name := range c.columnNames() {
@@ -199,8 +201,18 @@ func (c *Config) validateQuietTimers() error {
 	return nil
 }
 
-// validateColumnGates checks the two board-independent per-column keys: the
-// gate is a person or nothing, and one quiet destination at most.
+// validateColumnGates checks the board-independent per-column keys: the gate is
+// a person or nothing, at most one quiet destination, and every `next` entry
+// names a column.
+//
+// An empty `next` entry is refused rather than ignored, because ignoring it is
+// what made loading and rendering disagree: routesOf skips it, so Validate
+// accepted `next = ["review", ""]`, and BoardWorkflow then handed
+// feature.NewWorkflow a move to "" and the board refused to open at startup
+// with a dangling-column error naming nothing. Unlike on_success, where ""
+// means "no route" and is the documented way to clear an inherited one, a list
+// entry has nothing to clear: it is a typo, and the place to say so is the
+// file that has it.
 func (c *Config) validateColumnGates() error {
 	quiet := ""
 	for _, name := range c.columnNames() {
@@ -216,6 +228,12 @@ func (c *Config) validateColumnGates() error {
 				return fmt.Errorf("config: columns %q and %q both declare quiet = true (a quiet green pull request has exactly one destination)", quiet, name)
 			}
 			quiet = name
+		}
+		for index, next := range column.Next {
+			if strings.TrimSpace(next) == "" {
+				return fmt.Errorf(`config: column %q next[%d] is empty (every destination needs a column name; drop the entry, or omit next entirely for a column nothing moves off)`,
+					name, index)
+			}
 		}
 	}
 	return nil
@@ -254,6 +272,17 @@ func (c *Config) validateDeclaredBoard() error {
 			}
 			// A built-in column the line does not draw is simply not
 			// on this board, so its built-in routes are not either.
+			continue
+		}
+		if !c.fileColumns[name] {
+			// The same rule one step further in, and the reason it
+			// has to be stated twice: a line is free to REUSE a
+			// built-in name — "review", "done" — and inherit that
+			// name's Default() table without having configured it.
+			// Holding those inherited routes to the line refused a
+			// workflow nobody wrote, over a move nobody declared,
+			// and the only way out was to spell `on_failure = ""`
+			// for a column the file never mentions.
 			continue
 		}
 		for _, route := range routesOf(c.Columns[name]) {

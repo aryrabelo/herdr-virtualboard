@@ -64,8 +64,15 @@ value of its --issues flag.`,
 			if repo == "" {
 				return Usage("--repo is required: name the repository whose cards to read, as owner/name")
 			}
-			if strings.Count(repo, "/") != 1 {
-				return Usage("--repo %s is not in owner/name form", repo)
+			// Both halves, not just the slash: `--repo /bugtoprompt`
+			// and `--repo aryrabelo/` name no repository, and the
+			// store would happily open a file keyed on the typo and
+			// print an empty array — which reads as "nothing has
+			// been moved" rather than "that is not a repository".
+			owner, name, found := strings.Cut(repo, "/")
+			if !found || strings.Contains(name, "/") ||
+				strings.TrimSpace(owner) == "" || strings.TrimSpace(name) == "" {
+				return Usage("--repo %s is not in owner/name form: both halves are required, e.g. aryrabelo/bugtoprompt", repo)
 			}
 			dir, err := runs.DataDir()
 			if err != nil {

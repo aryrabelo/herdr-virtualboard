@@ -143,6 +143,28 @@ func TestStateShowRefusesWithoutARepository(t *testing.T) {
 	}
 }
 
+// A slash is not a repository. `--repo /bugtoprompt` and `--repo aryrabelo/`
+// have exactly one slash and named nothing, and the store opened a file keyed
+// on the typo and printed `[]` — which a caller reads as "no card has been
+// moved", the one answer this command must never invent.
+func TestStateShowRefusesHalfARepository(t *testing.T) {
+	t.Setenv("HVB_DATA_DIR", t.TempDir())
+
+	for _, repo := range []string{"/bugtoprompt", "aryrabelo/", "/", " /bugtoprompt", "aryrabelo/ "} {
+		out, _, err := runState(t, &App{}, "state", "--json", "show", "--repo", repo)
+		if err == nil {
+			t.Fatalf("--repo %q was accepted and printed %q", repo, out)
+		}
+		var usage UsageError
+		if !asUsage(err, &usage) {
+			t.Errorf("--repo %q failed with %T, want a usage error so the exit code is 64", repo, err)
+		}
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("--repo %q wrote %q to stdout; a failure must leave it empty", repo, out)
+		}
+	}
+}
+
 func asUsage(err error, target *UsageError) bool {
 	if candidate, ok := err.(UsageError); ok {
 		*target = candidate

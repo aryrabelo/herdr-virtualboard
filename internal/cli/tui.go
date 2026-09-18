@@ -37,7 +37,7 @@ FIOS.md threads, the gates/ ledgers and this week's pull requests — use
 			// A plugin pane that exits immediately is invisible: the user
 			// presses a key, something flashes, and nothing explains itself.
 			// Every startup failure becomes a screen the user can read.
-			if err := app.Resolve(); err != nil {
+			if err := app.ResolveSpecBoard(); err != nil {
 				if errors.Is(err, workspace.ErrNotFound) {
 					cwd, _ := os.Getwd()
 					return app.showNotice(ctx, tui.NoWorkspaceNotice(cwd, err), colour, err)

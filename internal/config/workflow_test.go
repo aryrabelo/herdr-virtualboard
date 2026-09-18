@@ -339,3 +339,82 @@ func TestValidateRefusesAGateThatIsNotHuman(t *testing.T) {
 		}
 	}
 }
+
+// Loading and opening the board must agree about the same file. An empty entry
+// in `next` used to pass Validate — routesOf skips it — and then reach
+// feature.NewWorkflow as a move to "", so the file loaded and the board
+// refused to start with a dangling-column error naming nothing. The refusal
+// belongs at the file that has the typo.
+func TestValidateRefusesAnEmptyNextEntry(t *testing.T) {
+	t.Setenv("HVB_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	root := t.TempDir()
+	writeConfig(t, root, ProjectFile, `
+[workflow]
+columns = ["intake", "done"]
+
+[columns.intake]
+next = ["done", ""]
+`)
+	cfg, err := Load(root)
+	if err == nil {
+		// The proof that this is one disagreement and not two
+		// behaviours: the file that loaded cannot draw a board.
+		_, boardErr := cfg.BoardWorkflow()
+		t.Fatalf(`next = ["done", ""] loaded, and BoardWorkflow then said: %v`, boardErr)
+	}
+	for _, want := range []string{"intake", "next"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// A queue line may reuse a built-in column name: "review" and "done" are
+// ordinary words for a board of pull requests. Doing so must not import the
+// built-in pipeline's routes — Default() sends review to done on success and
+// back to in-progress on failure — because the file declared neither. The line
+// below drew review and done without in-progress and was refused over a move
+// nobody wrote, whose only workaround was to spell `on_failure = ""` for a
+// column the file never mentions.
+func TestADeclaredLineDoesNotInheritBuiltInRoutes(t *testing.T) {
+	cfg := loadProject(t, `
+[workflow]
+columns = ["intake", "review", "done"]
+`)
+	wf, err := cfg.BoardWorkflow()
+	if err != nil {
+		t.Fatalf("BoardWorkflow: %v", err)
+	}
+	want := []feature.Status{"intake", "review", "done"}
+	got := wf.Columns()
+	if len(got) != len(want) {
+		t.Fatalf("the board draws %v, want %v", got, want)
+	}
+	for index, column := range want {
+		if got[index] != column {
+			t.Fatalf("the board draws %v, want %v", got, want)
+		}
+	}
+	// Inherited and ignored, not inherited and drawn: nothing moves off
+	// review, because no file said anything about review.
+	if next := wf.Next("review"); len(next) != 0 {
+		t.Errorf("review routes to %v; a name reused from the built-in pipeline declares no moves", next)
+	}
+}
+
+// The same rule from the other side: a table the FILE wrote is still held to
+// the line, so a real typo is still named.
+func TestAFileWrittenRouteOffTheLineIsStillRefused(t *testing.T) {
+	t.Setenv("HVB_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	root := t.TempDir()
+	writeConfig(t, root, ProjectFile, `
+[workflow]
+columns = ["intake", "review", "done"]
+
+[columns.review]
+on_failure = "in-progress"
+`)
+	if _, err := Load(root); err == nil {
+		t.Fatal(`on_failure = "in-progress" off a three-column line was accepted`)
+	}
+}

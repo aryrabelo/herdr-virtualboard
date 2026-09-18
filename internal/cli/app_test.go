@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -170,4 +172,100 @@ func findCommand(parent *cobra.Command, name string) *cobra.Command {
 		}
 	}
 	return nil
+}
+
+// queueOnlyWorkspace is a VirtualBoard workspace whose `.hvb.toml` declares a
+// queue line: columns vb has never heard of, which is what `hvb queue` renders
+// and a legal thing for a repository to configure.
+func queueOnlyWorkspace(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".virtualboard"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".hvb.toml"), []byte(`
+[workflow]
+columns = ["intake", "triage", "ready-to-merge"]
+
+[columns.triage]
+gate = "human"
+next = ["ready-to-merge"]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Neither the operator's config nor the real data directory may leak in.
+	t.Setenv("HVB_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	t.Setenv("HVB_DATA_DIR", t.TempDir())
+	return root
+}
+
+// The vb-authority gate belongs to the spec board, and only to it. Asking it
+// in the resolver every workspace command shares refused `hvb role list`,
+// `hvb run list` and `hvb doctor` outright in a workspace configured for a
+// queue board — none of which has any opinion about which columns vb can move
+// a spec into.
+func TestResolveLoadsAQueueOnlyWorkflow(t *testing.T) {
+	root := queueOnlyWorkspace(t)
+
+	app := &App{RootFlag: root}
+	if err := app.Resolve(); err != nil {
+		t.Fatalf("a non-TUI command must load a queue-only workflow: %v", err)
+	}
+	if got := app.Config().Workflow.Columns; len(got) != 3 || got[0] != "intake" {
+		t.Fatalf("resolved workflow columns = %v, want the declared queue line", got)
+	}
+
+	// The command a user actually runs, through the real tree. --root is
+	// the flag, not the field: cobra binds --root to App.RootFlag, so
+	// registering it resets whatever the field held.
+	var out, errOut bytes.Buffer
+	tree := NewRoot(&App{Out: &out, Err: &errOut})
+	tree.SetArgs([]string{"--root", root, "role", "list", "--json"})
+	tree.SetOut(&out)
+	tree.SetErr(&errOut)
+	if err := tree.Execute(); err != nil {
+		t.Fatalf("`hvb role list` in a queue-configured workspace: %v", err)
+	}
+}
+
+// The other half: the spec board still refuses the same file, because vb is
+// the authority on the lifecycle it draws.
+func TestTheSpecBoardStillRefusesAQueueOnlyWorkflow(t *testing.T) {
+	root := queueOnlyWorkspace(t)
+
+	app := &App{RootFlag: root}
+	err := app.ResolveSpecBoard()
+	if err == nil {
+		t.Fatal("the spec board accepted a line vb has never heard of")
+	}
+	for _, want := range []string{"triage", "VirtualBoard"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	// And `hvb tui` is the command that asks. Stdin is pointed at
+	// /dev/null so the notice screen cannot open — RunNotice returns the
+	// cause without a terminal, which is also what a script sees.
+	devNull, openErr := os.Open(os.DevNull)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer devNull.Close()
+	stdin := os.Stdin
+	os.Stdin = devNull
+	t.Cleanup(func() { os.Stdin = stdin })
+
+	var out, errOut bytes.Buffer
+	tree := NewRoot(&App{Out: &out, Err: &errOut})
+	tree.SetArgs([]string{"--root", root, "tui"})
+	tree.SetOut(&out)
+	tree.SetErr(&errOut)
+	tuiErr := tree.Execute()
+	if tuiErr == nil {
+		t.Fatal("`hvb tui` opened over a line vb has never heard of")
+	}
+	if !strings.Contains(tuiErr.Error(), "triage") {
+		t.Errorf("`hvb tui` failed with %q, which does not name the column vb rejected", tuiErr)
+	}
 }

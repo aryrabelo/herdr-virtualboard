@@ -5,6 +5,7 @@ package feature
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -163,7 +164,21 @@ func (w *Workflow) Parse(s string) (Status, bool) {
 }
 
 // Next returns the columns s may move to, in declared order.
-func (w *Workflow) Next(s Status) []Status { return w.defs[s].Next }
+//
+// A copy, unlike Columns: this slice is the transition table of a workflow
+// that may be a package-level singleton — VB() is built once — and its result
+// outlives the call, because config.vbDefs() hands it straight to a
+// ColumnDef of a new workflow. One caller reordering or overwriting an entry
+// in place would rewrite what vb allows for the rest of the process. The cost
+// is a handful of two-element slices per redraw, against a picker that can
+// silently corrupt the lifecycle.
+func (w *Workflow) Next(s Status) []Status {
+	next := w.defs[s].Next
+	if len(next) == 0 {
+		return nil
+	}
+	return slices.Clone(next)
+}
 
 // CanTransition reports whether current may move directly to target.
 func (w *Workflow) CanTransition(current, target Status) bool {

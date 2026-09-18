@@ -20,9 +20,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/fios"
 	"github.com/virtualboard/herdr-virtualboard/internal/ghboard"
 	"github.com/virtualboard/herdr-virtualboard/internal/issuesrc"
+	"github.com/virtualboard/herdr-virtualboard/internal/linha"
 )
 
 // The board spells the source labels itself so that composing a board does not
@@ -74,5 +76,56 @@ func TestLabelSpellingsMatchTheSources(t *testing.T) {
 	if fios.LabelResolvedOther == LabelCanceled {
 		t.Errorf("a resolved-another-way box now carries %q, which is the cancelled column's label",
 			LabelCanceled)
+	}
+}
+
+// The line's vocabulary is spelled in THREE places now, and nothing else stops
+// them drifting: internal/ghboard and internal/issuesrc mint the labels,
+// internal/linha reads them, and internal/config names one of them as the
+// legacy tail's `when`. A rename on any side would empty a column silently —
+// the card would still draw, in the wrong place, with no error anywhere.
+//
+// internal/linha respells rather than imports for the same reason the board
+// does: a pure policy package that imported a source would drag the gh CLI and
+// a process runner into every consumer that only wants to know where a card
+// goes. This test is what buys that separation safely.
+func TestThePolicyAndTheSourcesSpellTheSameFacts(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		policy, owner string
+	}{
+		{"state:open", linha.LabelStateOpen, ghboard.LabelOpen},
+		{"check:red", linha.LabelCheckRed, ghboard.LabelCheckRed},
+		{"activity:", linha.LabelActivityPrefix, ghboard.LabelActivityPrefix},
+		// The issue source and the pull-request source both report an open
+		// item, and the column claiming `hvb:state:open` is the one the
+		// quiet timer applies to. Two spellings would mean an open issue
+		// and an open pull request landing in different columns.
+		{"state:open, from the issue source", linha.LabelStateOpen, issuesrc.LabelStateOpen},
+	} {
+		if testCase.policy != testCase.owner {
+			t.Errorf("%s: the policy reads %q but the source writes %q",
+				testCase.name, testCase.policy, testCase.owner)
+		}
+	}
+
+	// Every fact the policy reads must be in the reserved namespace, or a
+	// repository label could forge a column.
+	for _, label := range []string{linha.LabelStateOpen, linha.LabelCheckRed,
+		linha.LabelActivityPrefix, ghboard.LabelMerged, ghboard.LabelCheckGreen,
+		issuesrc.LabelStateClosed} {
+		if !strings.HasPrefix(label, LabelPrefix) {
+			t.Errorf("%q is outside the reserved namespace, so repository content can forge it", label)
+		}
+	}
+
+	// With no `[workflow] columns` declared, config synthesizes the
+	// cancelled tail AND the label that reaches it. A column no label can
+	// reach is a cancelled pull request sitting in Done.
+	defaults := config.Default()
+	when := defaults.LineWhen()
+	if got := when["canceled"]; got != ghboard.LabelCanceled {
+		t.Errorf("the default line reaches its cancelled column with %q, but the source mints %q",
+			got, ghboard.LabelCanceled)
 	}
 }

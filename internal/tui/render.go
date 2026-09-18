@@ -57,8 +57,8 @@ func (m *Model) renderHeader() string {
 		if counts[status] == 0 && m.compact() {
 			continue
 		}
-		segments = append(segments, paint(m.palette.Status(status),
-			fmt.Sprintf("%s %d", shortStatus(status), counts[status])))
+		segments = append(segments, paint(m.palette.Status(status, m.workflow.Index(status)),
+			fmt.Sprintf("%s %d", m.workflow.Short(status), counts[status])))
 	}
 	right := strings.Join(segments, paint(m.palette.Border, " · "))
 	if active := m.ActiveRunCount(); active > 0 {
@@ -129,13 +129,28 @@ func (m *Model) keyHint() string {
 	}
 }
 
-// compact reports whether the board is on a narrow terminal — a phone, a
-// split pane — and should show one column at a time instead of five.
-func (m *Model) compact() bool { return m.width < compactWidth }
+// compact reports whether the board is on a narrow terminal — a phone, a split
+// pane — where only one column fits, and should show that one instead of a row
+// of unreadable slivers.
+func (m *Model) compact() bool { return m.visibleColumns() < 2 }
 
-// compactWidth is where five columns stop being readable: each needs about 22
-// columns plus borders.
-const compactWidth = 108
+// minColumnWidth is how narrow a column can be and still read: a card needs
+// room for an id, an owner and an age on one row. It is what decides how many
+// of a twelve-column line fit on screen at once.
+const minColumnWidth = 22
+
+// visibleColumns is how many columns the terminal has room for, whatever the
+// line declares. A declared line can be twelve columns long; a terminal cannot.
+func (m *Model) visibleColumns() int {
+	fit := m.width / minColumnWidth
+	if fit < 1 {
+		return 1
+	}
+	if order := len(m.columnOrder()); fit > order {
+		return order
+	}
+	return fit
+}
 
 func (m *Model) renderBoard() []string {
 	if m.compact() {
@@ -144,53 +159,101 @@ func (m *Model) renderBoard() []string {
 	return m.renderColumns()
 }
 
-// renderColumns draws every board column side by side.
+// renderColumns draws a window of columns side by side, centred on the focused
+// one.
+//
+// A window rather than every column, because a twelve-column line does not fit
+// on any terminal anyone uses: five columns at 22 each already wants 110, and
+// the alternative — dividing the width by twelve — produces nine-column cells
+// that can hold neither an id nor a title. The breadcrumb above names every
+// declared column, so the window never costs the user their place.
 func (m *Model) renderColumns() []string {
 	statuses := m.columnOrder()
 	height := m.height - 2
-	widths := splitWidth(m.width, len(statuses))
+	start, end := m.columnWindow()
+	visible := statuses[start:end]
 
-	rendered := make([][]string, len(statuses))
-	for index, status := range statuses {
-		rendered[index] = m.renderColumn(status, widths[index], height, index == m.column)
+	var out []string
+	if end-start < len(statuses) {
+		out = append(out, m.renderBreadcrumb(statuses, start, end))
+		height--
+	}
+	widths := splitWidth(m.width, len(visible))
+
+	rendered := make([][]string, len(visible))
+	for index, status := range visible {
+		rendered[index] = m.renderColumn(status, widths[index], height, start+index == m.column)
 	}
 
-	out := make([]string, height)
 	for row := 0; row < height; row++ {
 		var line strings.Builder
-		for index := range statuses {
+		for index := range visible {
 			if row < len(rendered[index]) {
 				line.WriteString(rendered[index][row])
 			} else {
 				line.WriteString(strings.Repeat(" ", widths[index]))
 			}
 		}
-		out[row] = line.String()
+		out = append(out, line.String())
 	}
 	return out
 }
 
-// renderSingleColumn is the narrow layout: one column, with the lifecycle shown
-// as a breadcrumb so the user still knows where they are.
+// columnWindow is the half-open range of columns to draw: as many as fit,
+// centred on the focused one and clamped to the ends, so walking right scrolls
+// the board instead of losing the cursor off the edge.
+func (m *Model) columnWindow() (int, int) {
+	statuses := m.columnOrder()
+	visible := m.visibleColumns()
+	start := m.column - visible/2
+	if start > len(statuses)-visible {
+		start = len(statuses) - visible
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start, start + visible
+}
+
+// renderSingleColumn is the narrow layout: one column, with the line shown as a
+// breadcrumb so the user still knows where they are.
 func (m *Model) renderSingleColumn() []string {
 	status := m.FocusedStatus()
 	height := m.height - 2
 	body := m.renderColumn(status, m.width, height-1, true)
 
+	out := make([]string, 0, height)
+	out = append(out, m.renderBreadcrumb(m.columnOrder(), m.column, m.column+1))
+	out = append(out, body...)
+	return out
+}
+
+// renderBreadcrumb names every column the board draws, marking the focused one
+// and showing `‹`/`›` when the window leaves columns off screen. It is the only
+// thing telling a user of a windowed board that the line continues.
+func (m *Model) renderBreadcrumb(statuses []feature.Status, start, end int) string {
 	var crumbs []string
-	for index, candidate := range m.columnOrder() {
-		label := shortStatus(candidate)
-		if index == m.column {
-			label = paint(m.palette.Invert, " "+label+" ")
-		} else {
-			label = paint(m.palette.Dim, " "+label+" ")
+	if start > 0 {
+		crumbs = append(crumbs, paint(m.palette.Border, "‹"))
+	}
+	for index, candidate := range statuses {
+		label := " " + m.workflow.Short(candidate) + " "
+		switch {
+		case index == m.column:
+			label = paint(m.palette.Invert, label)
+		case index < start || index >= end:
+			// Off-screen columns stay in the line but read as absent,
+			// so the trail is a map rather than a promise.
+			label = paint(m.palette.Border, label)
+		default:
+			label = paint(m.palette.Dim, label)
 		}
 		crumbs = append(crumbs, label)
 	}
-	out := make([]string, 0, height)
-	out = append(out, fit(strings.Join(crumbs, ""), m.width))
-	out = append(out, body...)
-	return out
+	if end < len(statuses) {
+		crumbs = append(crumbs, paint(m.palette.Border, "›"))
+	}
+	return fit(strings.Join(crumbs, ""), m.width)
 }
 
 // renderColumn draws one lifecycle column into a fixed width and height.
@@ -207,8 +270,8 @@ func (m *Model) renderColumn(status feature.Status, width, height int, focused b
 	}
 
 	body := make([]string, 0, height)
-	title := fmt.Sprintf("%s %d", strings.ToUpper(status.Title()), len(cards))
-	titleColour := m.palette.Status(status)
+	title := fmt.Sprintf("%s %d", strings.ToUpper(m.workflow.Title(status)), len(cards))
+	titleColour := m.palette.Status(status, m.workflow.Index(status))
 	if focused {
 		titleColour += m.palette.Bold
 	}
@@ -372,23 +435,6 @@ func scrollWindow(selected, total, visible int) int {
 		start = total - visible
 	}
 	return start
-}
-
-func shortStatus(status feature.Status) string {
-	switch status {
-	case feature.Backlog:
-		return "BACK"
-	case feature.InProgress:
-		return "WIP"
-	case feature.Blocked:
-		return "BLOCK"
-	case feature.Review:
-		return "REVIEW"
-	case feature.Done:
-		return "DONE"
-	default:
-		return strings.ToUpper(string(status))
-	}
 }
 
 func runGlyph(state runs.State) string {

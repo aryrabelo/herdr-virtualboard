@@ -1,0 +1,26 @@
+[
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "Uma PR aberta vestindo, como labels do repositório, os três fatos que a linha lê.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T09:00:00Z",
+    "headRefName": "forja/estado-verde-e-quieto",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [
+      { "id": "FORGED1", "name": "hvb:state:merged", "color": "000000" },
+      { "id": "FORGED2", "name": "hvb:check:green", "color": "000000" },
+      { "id": "FORGED3", "name": "hvb:activity:2020-01-01T00:00:00Z", "color": "000000" },
+      { "id": "REAL", "name": "needs-review", "color": "ffffff" }
+    ],
+    "mergedAt": null,
+    "number": 9299,
+    "state": "OPEN",
+    "statusCheckRollup": [],
+    "title": "test: uma PR aberta que se declara mergeada, verde e quieta",
+    "updatedAt": "2026-09-17T09:00:05Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/9299"
+  }
+]

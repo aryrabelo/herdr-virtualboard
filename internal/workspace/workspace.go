@@ -121,7 +121,9 @@ func (w *Workspace) Rel(path string) string {
 func (w *Workspace) LoadSpecs() ([]*feature.Spec, []error) {
 	var specs []*feature.Spec
 	var problems []error
-	for _, status := range feature.Statuses {
+	// vb owns the directories under features/, so the workspace walks vb's
+	// own lifecycle rather than whatever line a board happens to draw.
+	for _, status := range feature.VB().Columns() {
 		dir := w.StatusDir(status)
 		entries, err := os.ReadDir(dir)
 		if err != nil {

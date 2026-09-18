@@ -34,6 +34,8 @@ type Source struct {
 	timeout time.Duration
 	// limit is how many pull requests gh is asked for.
 	limit int
+	// fields is the `--json` field set WithActivity widens.
+	fields string
 }
 
 // New returns a Source for repo in `owner/name` form. window is the age of the
@@ -48,7 +50,28 @@ func New(repo string, window time.Duration) *Source {
 		now:     time.Now,
 		timeout: defaultTimeout,
 		limit:   defaultLimit,
+		fields:  ghFields,
 	}
+}
+
+// WithActivity widens the read to the head commit's checks and the pull
+// request's comments, which is what makes `hvb:check:*` and `hvb:activity:*`
+// appear on a card.
+//
+// It is opt-in because the rollup is seconds-expensive: measured 2026-09-17
+// against gh 2.97.0, `gh pr list --json number,statusCheckRollup` over 20 pull
+// requests of vercel/next.js took 7.9s, where the plain field set answers in
+// well under a second. A board that asked for it unconditionally would make
+// every `hvb queue --repo` refresh pay for a fact only the production line
+// reads, so the caller that needs the line asks for it.
+//
+// It mutates and returns the same Source rather than a copy, so a caller that
+// forgets to keep the result still gets the widened read instead of silently
+// getting the narrow one.
+func (s *Source) WithActivity() *Source {
+	s.fields = ghFields + "," + ghActivityFields
+	s.timeout = activityTimeout
+	return s
 }
 
 const (
@@ -56,6 +79,13 @@ const (
 	// closingIssuesReferences takes seconds on a busy repo; a board refresh
 	// that hangs past this is a failure worth reporting.
 	defaultTimeout = 30 * time.Second
+	// activityTimeout bounds the same call once WithActivity widened it.
+	// The rollup turns one cheap REST-ish read into a GraphQL walk over
+	// every check of every head commit: 7.9s for 20 pull requests measured
+	// against gh 2.97.0, so 200 of them need room the 30s above does not
+	// have. Failing at 30s would report a broken repository for a call that
+	// was merely doing the work it was asked for.
+	activityTimeout = 90 * time.Second
 	// defaultLimit is how deep into pull-request history gh is asked to
 	// look. gh's own default of 30 is too shallow for a busy week, and the
 	// window filter discards whatever is too old.
@@ -74,6 +104,11 @@ const (
 const ghFields = "number,title,author,state,isDraft,mergedAt,closedAt," +
 	"createdAt,updatedAt,labels,url,headRefName,body,isCrossRepository," +
 	"closingIssuesReferences"
+
+// ghActivityFields is what WithActivity adds, measured against the same gh
+// 2.97.0. Both are served by `gh pr list --json`, so widening the read costs a
+// slower call rather than a second one per pull request.
+const ghActivityFields = "statusCheckRollup,comments"
 
 // pullRequest mirrors the JSON gh emits for the fields above. Unlisted keys are
 // ignored, so gh growing its payload cannot break the parse.
@@ -106,6 +141,13 @@ type pullRequest struct {
 			} `json:"owner"`
 		} `json:"repository"`
 	} `json:"closingIssuesReferences"`
+	// Rollup is the head commit's checks, present only when WithActivity
+	// asked for them, so an absent key reads as a card with no measurement
+	// rather than as a card with no checks.
+	Rollup   []checkEntry `json:"statusCheckRollup"`
+	Comments []struct {
+		CreatedAt string `json:"createdAt"`
+	} `json:"comments"`
 }
 
 // Load fetches the window's pull requests and converts them to specs. Errors
@@ -169,7 +211,7 @@ func (s *Source) fetch(ctx context.Context) ([]byte, error) {
 		"--repo", s.repo,
 		"--state", "all",
 		"--limit", strconv.Itoa(s.limit),
-		"--json", ghFields,
+		"--json", s.fields,
 	)
 }
 
@@ -211,17 +253,18 @@ func (p *pullRequest) touchedAt() (time.Time, error) {
 // used to tell a local linked issue from a cross-repository one.
 func (p *pullRequest) spec(repoOwner string) *feature.Spec {
 	author := normalizeAuthor(p.Author.Login, p.Author.IsBot)
-	status, canceled := p.status()
+	status, state := p.status()
 
-	labels := newLabelSet(4 + len(p.Labels) + len(p.ClosingIssues))
+	labels := newLabelSet(7 + len(p.Labels) + len(p.ClosingIssues))
 	labels.add(LabelSourcePR)
 	labels.add(LabelPrefix + "pr:" + strconv.Itoa(p.Number))
 	if author != "" {
 		labels.add(LabelPrefix + "author:" + author)
 	}
-	if canceled {
-		labels.add(LabelCanceled)
-	}
+	// Exactly one state label, because status() decides it in one switch.
+	// Two would be a contradiction the line policy would resolve by
+	// declaration order rather than by fact.
+	labels.add(state)
 	// External means "this did not come from a teammate", and it is decided
 	// without a second network call, from two fields already in hand.
 	//
@@ -251,6 +294,18 @@ func (p *pullRequest) spec(repoOwner string) *feature.Spec {
 	}
 	if p.IsDraft {
 		labels.add(LabelDraft)
+	}
+	// Checks and activity are minted only from what WithActivity measured.
+	// Without it the two keys never arrive, so the rollup is empty and no
+	// label appears — which is the honest answer: nobody looked.
+	switch checksOf(p.Rollup) {
+	case checksRed:
+		labels.add(LabelCheckRed)
+	case checksGreen:
+		labels.add(LabelCheckGreen)
+	}
+	if at, ok := p.activityAt(); ok {
+		labels.add(LabelActivityPrefix + at.UTC().Format(time.RFC3339))
 	}
 
 	deps := make([]string, 0, len(p.ClosingIssues))
@@ -309,28 +364,195 @@ const LabelPrefix = "hvb:"
 // backend keys its extra terminal column off LabelCanceled and its badge off
 // LabelExternal, so both are named here rather than spelled twice. Callers
 // MUST use these constants; the strings are never typed out a second time.
+//
+// The three state labels live under `state:` rather than under the existing
+// `pr:` prefix because `pr:` already carries a NUMBER — a consumer reads
+// everything after the first `hvb:pr:` as the pull request's number, so
+// `hvb:pr:merged` would parse as a pull request numbered "merged".
 const (
 	LabelSourcePR = LabelPrefix + "source:pr"
-	LabelCanceled = LabelPrefix + "state:canceled"
 	LabelExternal = LabelPrefix + "external"
 	LabelDraft    = LabelPrefix + "draft"
+
+	// Exactly one of these three is on every card: the pull request is
+	// merged, or closed without merging, or open.
+	LabelMerged   = LabelPrefix + "state:merged"
+	LabelCanceled = LabelPrefix + "state:canceled"
+	LabelOpen     = LabelPrefix + "state:open"
+
+	// The check verdict, minted only when WithActivity measured the
+	// rollup. Neither appears on a pull request with no checks at all,
+	// because "nobody ran anything" is not green.
+	LabelCheckRed   = LabelPrefix + "check:red"
+	LabelCheckGreen = LabelPrefix + "check:green"
+
+	// LabelActivityPrefix carries an RFC3339 timestamp: the last moment
+	// somebody or something actually worked on the pull request.
+	LabelActivityPrefix = LabelPrefix + "activity:"
 )
 
 // status maps a pull request onto the five-state lifecycle without inventing a
-// sixth. Merge is decided by mergedAt rather than by state, because gh reports
+// sixth, and returns the state label that says which of the three it is.
+//
+// Merge is decided by mergedAt rather than by state, because gh reports
 // closedAt for a merged pull request too (measured: #179 carries both, equal).
-func (p *pullRequest) status() (status feature.Status, canceled bool) {
+// One switch returning one label is also what makes the three mutually
+// exclusive by construction, rather than by three independent ifs a later
+// edit could make overlap.
+func (p *pullRequest) status() (status feature.Status, state string) {
 	switch {
 	case p.MergedAt != "":
-		return feature.Done, false
+		return feature.Done, LabelMerged
 	case p.ClosedAt != "" || strings.EqualFold(p.State, "CLOSED"):
 		// Closed without merging is terminal-but-not-shipped. The domain
 		// has no `canceled`, so the fact travels as a label and the
 		// composing board derives its own column from it.
-		return feature.Done, true
+		return feature.Done, LabelCanceled
 	default:
-		return feature.Review, false
+		return feature.Review, LabelOpen
 	}
+}
+
+// checkEntry is one entry of statusCheckRollup, decoded leniently.
+//
+// Two shapes arrive on that key and they do not share a field name. Measured
+// against gh 2.97.0, `__typename:"CheckRun"` carries
+// `conclusion,status,name,startedAt,completedAt,workflowName`; GitHub's schema
+// also serves `__typename:"StatusContext"` for a legacy commit status, which
+// carries `context,state,createdAt,targetUrl` instead — no `conclusion`, no
+// `status`, no `completedAt`. None appeared in the repositories measured, so
+// rather than pin the shape that happened to show up, both spellings are read
+// and an absent key is absence. The rejected alternative was decoding only
+// CheckRun: a repository still on commit statuses would then come back with
+// zero red checks and the line would advance a broken pull request.
+type checkEntry struct {
+	Conclusion  string `json:"conclusion"`
+	State       string `json:"state"`
+	Status      string `json:"status"`
+	StartedAt   string `json:"startedAt"`
+	CompletedAt string `json:"completedAt"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+// checkVerdict is what the rollup says about the head commit.
+type checkVerdict int
+
+const (
+	// checksAbsent is a pull request with no checks in the rollup — either
+	// because nothing runs on it or because nobody asked for the field.
+	checksAbsent checkVerdict = iota
+	checksRed
+	checksPending
+	checksGreen
+)
+
+// checksOf reduces the rollup to one verdict. Red wins over pending because a
+// failure is already a fact; pending wins over green because a run still going
+// has not said anything yet.
+func checksOf(rollup []checkEntry) checkVerdict {
+	verdict := checksAbsent
+	for _, entry := range rollup {
+		switch {
+		case entry.red():
+			return checksRed
+		case entry.pending():
+			verdict = checksPending
+		case verdict == checksAbsent:
+			verdict = checksGreen
+		}
+	}
+	return verdict
+}
+
+// redConclusions are the outcomes that mean the check said no. CANCELLED and
+// TIMED_OUT are here because the line must not advance a pull request whose
+// suite never finished: treating them as "not a failure" would read a killed
+// run as permission to move.
+var redConclusions = map[string]bool{
+	"FAILURE":         true,
+	"TIMED_OUT":       true,
+	"CANCELLED":       true,
+	"ACTION_REQUIRED": true,
+	"ERROR":           true,
+}
+
+func (c checkEntry) red() bool {
+	return redConclusions[strings.ToUpper(strings.TrimSpace(c.Conclusion))] ||
+		redConclusions[strings.ToUpper(strings.TrimSpace(c.State))]
+}
+
+// pending is a check that has not reported yet. A CheckRun says so in `status`
+// (anything but COMPLETED: QUEUED, IN_PROGRESS, WAITING, REQUESTED); a legacy
+// StatusContext has no `status` key at all and says PENDING in `state`.
+//
+// An absent `status` therefore has to read as absence rather than as "not
+// COMPLETED". The rejected alternative — a bare `c.Status != "COMPLETED"` —
+// would call every StatusContext pending, so a repository on commit statuses
+// would never show green and the quiet timer would never fire for it.
+func (c checkEntry) pending() bool {
+	if status := strings.ToUpper(strings.TrimSpace(c.Status)); status != "" && status != "COMPLETED" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(c.State), "PENDING")
+}
+
+// reportedAt is when this entry last said something: a CheckRun's completedAt,
+// its startedAt while it is still running, or a StatusContext's createdAt.
+func (c checkEntry) reportedAt() (time.Time, bool) {
+	return firstTimestamp(c.CompletedAt, c.StartedAt, c.CreatedAt)
+}
+
+// activityAt is the last moment the pull request was actually worked on: the
+// newest of its checks' reports and its comments.
+//
+// updatedAt is deliberately not a candidate. GitHub bumps it for a label
+// change or a body edit, neither of which is a check or a comment, so a quiet
+// timer measured against it would never expire on a pull request some bot
+// keeps relabelling — the pull request would read "active" forever and the
+// line would stall on it.
+//
+// The bool is false when neither was measured, and then no label is minted at
+// all: absence of measurement is not an old timestamp, and inventing one (say
+// createdAt) would make an unmeasured pull request look quiet enough to
+// advance.
+func (p *pullRequest) activityAt() (time.Time, bool) {
+	var newest time.Time
+	var found bool
+	note := func(t time.Time, ok bool) {
+		if !ok {
+			return
+		}
+		if !found || t.After(newest) {
+			newest, found = t, true
+		}
+	}
+	for _, entry := range p.Rollup {
+		note(entry.reportedAt())
+	}
+	for _, comment := range p.Comments {
+		note(firstTimestamp(comment.CreatedAt))
+	}
+	return newest, found
+}
+
+// firstTimestamp parses the first of raw that is both present and RFC3339.
+//
+// An unparseable timestamp is skipped rather than reported: activity is
+// enrichment, and costing a card over one malformed check clock would lose the
+// pull request from the board entirely. touchedAt is the opposite call — a
+// card with no readable clock at all cannot be placed in the window, so there
+// it is an error.
+func firstTimestamp(raw ...string) (time.Time, bool) {
+	for _, candidate := range raw {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339, candidate); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // normalizeAuthor renders a login the way GitHub's own UI does. gh reports a

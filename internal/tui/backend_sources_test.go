@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
@@ -44,6 +45,31 @@ func prCard(number, title string, status feature.Status, labels ...string) *feat
 	return card
 }
 
+// columnCanceled is the cancelled tail of a queue board. It is a column name,
+// not a vb state: feature.Status is a string type, so a declared line can hold
+// columns vb has never heard of.
+const columnCanceled feature.Status = "canceled"
+
+// queueWorkflow is the line a `hvb queue` board draws when nothing declared
+// one: vb's five columns plus the cancelled tail, hidden while empty.
+func queueWorkflow(t *testing.T) *feature.Workflow {
+	t.Helper()
+	cfg := config.Default()
+	wf, err := cfg.BoardWorkflow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wf
+}
+
+// canceledPR is a pull request that closed without merging, as the board
+// receives it: the column is resolved before the card arrives — the source
+// mints `hvb:state:canceled` and the line policy turns it into a column — so
+// the presentation layer is handed a card that is already in the tail.
+func canceledPR(number, title string, labels ...string) *feature.Spec {
+	return prCard(number, title, columnCanceled, append([]string{LabelCanceled}, labels...)...)
+}
+
 // A board that reads two sources must survive one of them failing. Going blank
 // because GitHub is unreachable hides the owner's own queue for a reason that
 // has nothing to do with it.
@@ -53,7 +79,7 @@ func TestLoadKeepsTheWorkingSourceWhenTheOtherFails(t *testing.T) {
 		fiosCard("FIO-3", "Ligar o board na fila real", feature.Backlog, "/vault/FIOS.md"),
 		fiosCard("FIO-4", "Fechar a rodada do jarvis", feature.Blocked, "/vault/FIOS.md"),
 	}}
-	backend := NewSourceBackend("vault + repo", nil, "ary", broken, working)
+	backend := NewSourceBackend("vault + repo", nil, nil, "ary", broken, working)
 
 	specs, runList, problems := backend.Load(context.Background())
 
@@ -78,7 +104,7 @@ func TestMutationsAreRefusedNamingTheOwningFile(t *testing.T) {
 		LabelSourceGates, labelGatePrefix+"factory-cnb.md")
 	gate.Path = "/vault/gates/factory-cnb.md"
 
-	backend := NewSourceBackend("vault", nil, "ary", &fakeSource{specs: []*feature.Spec{
+	backend := NewSourceBackend("vault", nil, nil, "ary", &fakeSource{specs: []*feature.Spec{
 		fiosCard("FIO-3", "Ligar o board na fila real", feature.Backlog, "/vault/FIOS.md"),
 		gate,
 		prCard("179", "board: ler a fila real", feature.Review, labelIssuePrefix+"168"),
@@ -132,8 +158,8 @@ func TestMutationsAreRefusedNamingTheOwningFile(t *testing.T) {
 // the cursor cannot reach is worse than no column at all.
 func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 	landed := prCard("178", "harness: fechar o gate", feature.Done, labelIssuePrefix+"167")
-	dropped := prCard("179", "board: abandonado", feature.Done, LabelCanceled, labelIssuePrefix+"168")
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{
+	dropped := canceledPR("179", "board: abandonado", labelIssuePrefix+"168")
+	backend := NewSourceBackend("repo", nil, queueWorkflow(t), "ary", &fakeSource{
 		specs: []*feature.Spec{landed, dropped},
 	})
 	model := newTestModel(t, backend, 160, 30)
@@ -142,10 +168,10 @@ func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 	if counts[feature.Done] != 1 {
 		t.Errorf("Done holds %d cards, want only the merged one", counts[feature.Done])
 	}
-	if counts[StatusCanceled] != 1 {
-		t.Errorf("the terminal column holds %d cards, want the cancelled one", counts[StatusCanceled])
+	if counts[columnCanceled] != 1 {
+		t.Errorf("the terminal column holds %d cards, want the cancelled one", counts[columnCanceled])
 	}
-	if cards := model.Cards(StatusCanceled); len(cards) != 1 || cards[0].Spec.ID != "PR-179" {
+	if cards := model.Cards(columnCanceled); len(cards) != 1 || cards[0].Spec.ID != "PR-179" {
 		t.Fatalf("the cancelled column holds %+v", cards)
 	}
 
@@ -156,7 +182,7 @@ func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 	for step := 0; step < 20; step++ {
 		model.Handle(ctx, Key{Name: KeyRight})
 	}
-	if got := model.FocusedStatus(); got != StatusCanceled {
+	if got := model.FocusedStatus(); got != columnCanceled {
 		t.Fatalf("walking right ends on %q, so the cancelled column is unreachable", got)
 	}
 	if card := model.FocusedCard(); card == nil || card.Spec.ID != "PR-179" {
@@ -165,10 +191,10 @@ func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 
 	// And it is a real column on screen: counted in the header, and with its
 	// card actually drawn in the body. The two are asserted apart because the
-	// header segment and the column title render the same text, so a single
-	// whole-screen match would let either one alone satisfy it.
+	// header abbreviates where the column title spells the name out, so a
+	// single whole-screen match would let either one alone satisfy it.
 	frame := model.Render()
-	if !strings.Contains(frame[0], "CANCELED 1") {
+	if !strings.Contains(frame[0], "CANCEL 1") {
 		t.Errorf("the header does not count the cancelled column: %q", frame[0])
 	}
 	body := strings.Join(frame[1:], "\n")
@@ -179,7 +205,7 @@ func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 	// width — 26 columns at 160/6 truncates one somewhere regardless — while
 	// the id is what names the card and the kind marker is what says what it
 	// is. Both have to reach the screen, and neither appears in the header,
-	// which carries only "CANCELED 1".
+	// which carries only "CANCEL 1".
 	if !strings.Contains(body, "#179 (PR)") {
 		t.Errorf("the cancelled card itself is not drawn\n%s", body)
 	}
@@ -189,12 +215,12 @@ func TestCancelledCardsGetTheirOwnReachableColumn(t *testing.T) {
 // cursor there. Starting on an empty Backlog makes the user navigate before the
 // board tells them anything.
 func TestBoardOpensWhereTheWorkIsEvenWhenItIsCancelled(t *testing.T) {
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{specs: []*feature.Spec{
-		prCard("179", "board: abandonado", feature.Done, LabelCanceled),
+	backend := NewSourceBackend("repo", nil, queueWorkflow(t), "ary", &fakeSource{specs: []*feature.Spec{
+		canceledPR("179", "board: abandonado"),
 	}})
 	model := newTestModel(t, backend, 160, 30)
 
-	if got := model.FocusedStatus(); got != StatusCanceled {
+	if got := model.FocusedStatus(); got != columnCanceled {
 		t.Fatalf("the board opened on %q, not on the only populated column", got)
 	}
 	if card := model.FocusedCard(); card == nil || card.Spec.ID != "PR-179" {
@@ -208,19 +234,17 @@ func TestBoardOpensWhereTheWorkIsEvenWhenItIsCancelled(t *testing.T) {
 func TestReloadFollowsACardIntoTheCancelledColumn(t *testing.T) {
 	open := prCard("179", "board: ler a fila real", feature.Review, labelIssuePrefix+"168")
 	source := &fakeSource{specs: []*feature.Spec{open}}
-	model := newTestModel(t, NewSourceBackend("repo", nil, "ary", source), 160, 30)
+	model := newTestModel(t, NewSourceBackend("repo", nil, queueWorkflow(t), "ary", source), 160, 30)
 
 	if got := model.FocusedStatus(); got != feature.Review {
 		t.Fatalf("the board opened on %q, want review", got)
 	}
 
 	// The pull request is closed without merging.
-	source.specs = []*feature.Spec{
-		prCard("179", "board: ler a fila real", feature.Done, LabelCanceled, labelIssuePrefix+"168"),
-	}
+	source.specs = []*feature.Spec{canceledPR("179", "board: ler a fila real", labelIssuePrefix+"168")}
 	model.Reload(context.Background())
 
-	if got := model.FocusedStatus(); got != StatusCanceled {
+	if got := model.FocusedStatus(); got != columnCanceled {
 		t.Fatalf("the cursor stayed on %q after the card moved", got)
 	}
 	if card := model.FocusedCard(); card == nil || card.Spec.ID != "PR-179" {
@@ -232,10 +256,10 @@ func TestReloadFollowsACardIntoTheCancelledColumn(t *testing.T) {
 // still there. A column drawing two cards with nothing selected is how a user
 // presses a key and watches it go nowhere.
 func TestReloadClampsTheCursorInsideTheCancelledColumn(t *testing.T) {
-	first := prCard("178", "primeiro abandonado", feature.Done, LabelCanceled)
-	second := prCard("179", "segundo abandonado", feature.Done, LabelCanceled)
+	first := canceledPR("178", "primeiro abandonado")
+	second := canceledPR("179", "segundo abandonado")
 	source := &fakeSource{specs: []*feature.Spec{first, second}}
-	model := newTestModel(t, NewSourceBackend("repo", nil, "ary", source), 160, 30)
+	model := newTestModel(t, NewSourceBackend("repo", nil, queueWorkflow(t), "ary", source), 160, 30)
 
 	ctx := context.Background()
 	model.Handle(ctx, Key{Name: KeyDown})
@@ -252,24 +276,25 @@ func TestReloadClampsTheCursorInsideTheCancelledColumn(t *testing.T) {
 }
 
 // The header's run counter is the board's only whole-board signal. A run in the
-// derived column is as live as any other and must be counted.
+// cancelled tail is as live as any other and must be counted.
 //
-// The card needs the pull-request source as well as the cancelled label,
-// because that is what puts it in the derived column at all — with the label
-// alone it sits in Done and this test would pass while proving nothing.
+// The board has to be a queue board for this to test anything: the spec board
+// draws vb's five columns, so a card in the tail would be in no column at all
+// and the assertions below would pass having measured nothing.
 func TestActiveRunsInTheCancelledColumnAreCounted(t *testing.T) {
-	card := spec("PR-7", "abandonado com agente vivo", feature.Done, LabelSourcePR, LabelCanceled)
+	card := spec("PR-7", "abandonado com agente vivo", columnCanceled, LabelSourcePR, LabelCanceled)
 	backend := newFakeBackend(card)
+	backend.wf = queueWorkflow(t)
 	backend.runs = []*runs.Run{{
 		ID: "r-1", FeatureID: "PR-7", Role: "qa", Kind: "claude",
 		State: runs.Running, PaneID: "w1:p1", StartedAt: time.Now(),
 	}}
 	model := newTestModel(t, backend, 160, 30)
 
-	// The guard against the guard: if this card were not in the derived
-	// column, everything below would pass without testing it.
-	if got := len(model.Cards(StatusCanceled)); got != 1 {
-		t.Fatalf("the derived column holds %d cards, so this test proves nothing", got)
+	// The guard against the guard: if this card were not in the tail,
+	// everything below would pass without testing it.
+	if got := len(model.Cards(columnCanceled)); got != 1 {
+		t.Fatalf("the cancelled column holds %d cards, so this test proves nothing", got)
 	}
 	if got := model.ActiveRunCount(); got != 1 {
 		t.Fatalf("the board counts %d active runs, want 1", got)
@@ -279,27 +304,32 @@ func TestActiveRunsInTheCancelledColumnAreCounted(t *testing.T) {
 	}
 }
 
-// The narrow layout replaces the columns with a breadcrumb. The derived column
-// has to appear in it, or a user in a split pane cannot tell where they are.
+// The compact layout replaces the columns with a breadcrumb. Every column has
+// to appear in it, the cancelled tail included, or a user in a split pane
+// cannot tell where they are.
 func TestCompactBreadcrumbIncludesTheCancelledColumn(t *testing.T) {
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{specs: []*feature.Spec{
+	backend := NewSourceBackend("repo", nil, queueWorkflow(t), "ary", &fakeSource{specs: []*feature.Spec{
 		prCard("178", "entregue", feature.Done),
-		prCard("179", "board: abandonado", feature.Done, LabelCanceled),
+		canceledPR("179", "board: abandonado"),
 	}})
-	model := newTestModel(t, backend, 100, 30)
+	// Narrow enough that only one column fits, which is what compact means.
+	model := newTestModel(t, backend, 43, 30)
+	if !model.compact() {
+		t.Fatal("43 columns fits more than one board column, so this is not the compact layout")
+	}
 
 	ctx := context.Background()
 	model.column = 0
-	for step := 0; step < 20; step++ {
+	for range 20 {
 		model.Handle(ctx, Key{Name: KeyRight})
 	}
-	if got := model.FocusedStatus(); got != StatusCanceled {
+	if got := model.FocusedStatus(); got != columnCanceled {
 		t.Fatalf("walking right in the narrow layout ends on %q", got)
 	}
 
 	// Frame line 0 is the header; line 1 is the breadcrumb.
 	crumbs := model.Render()[1]
-	if !strings.Contains(crumbs, "CANCELED") {
+	if !strings.Contains(crumbs, "CANCEL") {
 		t.Errorf("the breadcrumb omits the column the cursor is on: %q", crumbs)
 	}
 	if !strings.Contains(crumbs, "DONE") {
@@ -307,14 +337,25 @@ func TestCompactBreadcrumbIncludesTheCancelledColumn(t *testing.T) {
 	}
 }
 
-// Without a cancelled card the board is exactly the five-column VirtualBoard
-// lifecycle: the derived column must not appear on a spec-markdown board.
+// A queue board with nothing cancelled is exactly the five-column VirtualBoard
+// lifecycle. The tail is declared — it is in the workflow either way — and has
+// to stay off the screen until something lands in it.
 func TestTheDerivedColumnStaysHiddenWhenEmpty(t *testing.T) {
 	backend := newFakeBackend(spec("FTR-0001", "First thing", feature.Done))
+	backend.wf = queueWorkflow(t)
 	model := newTestModel(t, backend, 160, 30)
 
-	if strings.Contains(screen(model), "CANCELED") {
+	if strings.Contains(screen(model), "CANCEL") {
 		t.Error("a board with nothing cancelled grew a sixth column")
+	}
+	order := model.columnOrder()
+	if len(order) != 5 {
+		t.Fatalf("the board draws %v, want vb's five columns alone", order)
+	}
+	for index, want := range feature.VB().Columns() {
+		if order[index] != want {
+			t.Errorf("column %d is %q, want %q", index, order[index], want)
+		}
 	}
 	model.column = 0
 	for step := 0; step < 20; step++ {
@@ -328,18 +369,24 @@ func TestTheDerivedColumnStaysHiddenWhenEmpty(t *testing.T) {
 // The card facts the approved design asks for: the pull-request number, the
 // linked issue, the outside author, and how old the item is.
 //
-// The geometry is the narrow one-column layout, which is how the board is read
-// in a split pane and the only width where a card has room for every fact. On a
-// five-column board a 31-column card truncates the meta row, exactly as it
-// already does for a long role name.
+// Asserted on the card at 100 columns rather than on a whole frame, because no
+// frame gives a card that much: the compact layout is one column only when
+// fewer than two fit, so its widest card is 43 columns, and a windowed board
+// divides the width by however many columns fit. A 31-column card truncates
+// the meta row exactly as it already does for a long role name, so a
+// whole-screen assertion would be measuring the truncation, not the facts.
 func TestCardShowsThePullRequestFacts(t *testing.T) {
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{specs: []*feature.Spec{
+	backend := NewSourceBackend("repo", nil, nil, "ary", &fakeSource{specs: []*feature.Spec{
 		prCard("179", "board: ler a fila real", feature.Review,
 			labelIssuePrefix+"168", LabelExternal, LabelDraft),
 	}})
-	model := newTestModel(t, backend, 100, 30)
+	model := newTestModel(t, backend, 160, 30)
+	card := model.FocusedCard()
+	if card == nil {
+		t.Fatal("the board opened on no card")
+	}
 
-	out := screen(model)
+	out := strings.Join(model.renderCard(card, 100, false), "\n")
 	for _, want := range []string{"#179", "factory-bora[bot]", "Issue #168", "Draft", "External", "41m"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the card does not show %q\n%s", want, out)
@@ -401,28 +448,24 @@ func TestCardIDTreatsTheIDAsOpaque(t *testing.T) {
 	}
 }
 
-// The terminal column means one thing: a pull request that closed without
-// merging. It is not the drawer for whatever did not fit, so a done card with
-// any other label stays in Done.
-//
-// The last card is the one that matters. A source passes a repository's real
-// labels through verbatim, and a repository may have a label named literally
-// `state:canceled` — so the label alone cannot be trusted to mean the board's
-// own verdict. Requiring the pull-request source keeps every other source out
-// of the column no matter what its items are labelled.
+// The cancelled tail is not the drawer for whatever did not fit. The board
+// draws the column the card arrived in and does not go looking for a reason to
+// move it, so a done card stays in Done whatever its labels say — including a
+// `hvb:state:canceled` on a card from another source, which the line policy
+// refuses to read as a cancelled pull request.
 func TestTheTerminalColumnIsNotACatchAll(t *testing.T) {
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{specs: []*feature.Spec{
+	backend := NewSourceBackend("repo", nil, queueWorkflow(t), "ary", &fakeSource{specs: []*feature.Spec{
 		spec("GATE-x-1", "resolvido de outra forma", feature.Done, LabelSourceGates, "resolved:other"),
 		spec("FIO-9", "entregue", feature.Done, LabelSourceFios, "closed", "stale"),
 		spec("FIO-10", "fio com label de outro mundo", feature.Done, LabelSourceFios, LabelCanceled),
-		prCard("179", "fechado sem merge", feature.Done, LabelCanceled),
+		canceledPR("179", "fechado sem merge"),
 	}})
 	model := newTestModel(t, backend, 160, 30)
 
 	if got := model.Counts()[feature.Done]; got != 3 {
 		t.Errorf("Done holds %d cards, want the three that are merely done", got)
 	}
-	cards := model.Cards(StatusCanceled)
+	cards := model.Cards(columnCanceled)
 	if len(cards) != 1 || cards[0].Spec.ID != "PR-179" {
 		t.Fatalf("the terminal column holds %+v, want only the cancelled pull request", cards)
 	}
@@ -438,8 +481,8 @@ func TestTheTerminalColumnIsNotACatchAll(t *testing.T) {
 // two independent reasons to be right is the point.
 func TestAForgedSourceLabelChangesNothing(t *testing.T) {
 	merged := prCard("178", "entregue", feature.Done, LabelSourceFios)
-	dropped := prCard("179", "fechado sem merge", feature.Done, LabelCanceled, LabelSourceFios, LabelSourceGates)
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{
+	dropped := canceledPR("179", "fechado sem merge", LabelSourceFios, LabelSourceGates)
+	backend := NewSourceBackend("repo", nil, queueWorkflow(t), "ary", &fakeSource{
 		specs: []*feature.Spec{merged, dropped},
 	})
 	model := newTestModel(t, backend, 160, 30)
@@ -448,7 +491,7 @@ func TestAForgedSourceLabelChangesNothing(t *testing.T) {
 	if got := model.Counts()[feature.Done]; got != 1 {
 		t.Errorf("Done holds %d cards, want the merged pull request", got)
 	}
-	cards := model.Cards(StatusCanceled)
+	cards := model.Cards(columnCanceled)
 	if len(cards) != 1 || cards[0].Spec.ID != "PR-179" {
 		t.Fatalf("the terminal column holds %+v, want only the dead pull request", cards)
 	}
@@ -471,9 +514,9 @@ func TestAForgedSourceLabelChangesNothing(t *testing.T) {
 // pointing it at an unreachable repository dropped 39 cards and reported
 // "1 spec(s) could not be read", which reads like a single bad file.
 func TestAnEmptyBoardSaysWhyItIsEmpty(t *testing.T) {
-	failed := NewSourceBackend("repo", nil, "ary",
+	failed := NewSourceBackend("repo", nil, nil, "ary",
 		&fakeSource{problems: []error{errors.New("gh: could not resolve to a Repository")}})
-	clean := NewSourceBackend("repo", nil, "ary", &fakeSource{})
+	clean := NewSourceBackend("repo", nil, nil, "ary", &fakeSource{})
 
 	broken := strings.Join(newTestModel(t, failed, 160, 30).Render(), "\n")
 	if !strings.Contains(broken, "a source failed") {
@@ -496,7 +539,7 @@ func TestAnEmptyBoardSaysWhyItIsEmpty(t *testing.T) {
 // opened. Without this, `hvb tui` on a workspace with no specs is a blank
 // board that never mentions `hvb queue`.
 func TestTheEmptyBoardCarriesTheCallersHint(t *testing.T) {
-	model := newTestModel(t, NewSourceBackend("repo", nil, "ary", &fakeSource{}), 160, 30)
+	model := newTestModel(t, NewSourceBackend("repo", nil, nil, "ary", &fakeSource{}), 160, 30)
 	model.emptyHint = "run `hvb queue` for the owner's queue"
 
 	out := strings.Join(model.Render(), "\n")
@@ -509,7 +552,7 @@ func TestTheEmptyBoardCarriesTheCallersHint(t *testing.T) {
 // queue before the first read is the same lie pointing the other way, and it
 // is the state every board passes through.
 func TestABoardThatHasNotLoadedClaimsNothing(t *testing.T) {
-	model := NewModel(NewSourceBackend("repo", nil, "ary", &fakeSource{}), Palette{})
+	model := NewModel(NewSourceBackend("repo", nil, nil, "ary", &fakeSource{}), Palette{})
 	model.Resize(160, 30)
 
 	if model.Empty() {
@@ -524,7 +567,7 @@ func TestABoardThatHasNotLoadedClaimsNothing(t *testing.T) {
 // run store, a whole source. Calling every one a spec misstates both what
 // broke and how much of the board is missing.
 func TestProblemsAreNotAllCalledSpecs(t *testing.T) {
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{
+	backend := NewSourceBackend("repo", nil, nil, "ary", &fakeSource{
 		specs:    []*feature.Spec{prCard("179", "board: ler a fila real", feature.Review)},
 		problems: []error{errors.New("gh: could not resolve to a Repository")},
 	})

@@ -1,0 +1,210 @@
+[
+  {
+    "author": { "is_bot": true, "login": "app/factory-bora" },
+    "body": "Fecha #212.",
+    "closedAt": "2026-09-17T12:00:04Z",
+    "closingIssuesReferences": [],
+    "comments": [
+      { "createdAt": "2026-09-17T11:50:00Z", "author": { "login": "aryrabelo" }, "body": "LGTM" }
+    ],
+    "createdAt": "2026-09-17T10:31:00Z",
+    "headRefName": "factory/issue-212",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": "2026-09-17T12:00:04Z",
+    "number": 301,
+    "state": "MERGED",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T11:40:00Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/aryrabelo/bugtoprompt/actions/runs/1",
+        "name": "gates",
+        "startedAt": "2026-09-17T11:36:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      }
+    ],
+    "title": "feat: mint the state fact on every card",
+    "updatedAt": "2026-09-17T12:00:09Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/301"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "Abandonado: a abordagem do #301 é melhor.",
+    "closedAt": "2026-09-17T09:00:00Z",
+    "closingIssuesReferences": [],
+    "comments": [
+      { "createdAt": "2026-09-17T08:30:00Z", "author": { "login": "aryrabelo" }, "body": "fechando" }
+    ],
+    "createdAt": "2026-09-16T18:00:00Z",
+    "headRefName": "experimento/state-no-pr-prefix",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 300,
+    "state": "CLOSED",
+    "statusCheckRollup": [],
+    "title": "spike: guardar o estado no prefixo pr:",
+    "updatedAt": "2026-09-17T09:00:03Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/300"
+  },
+  {
+    "author": { "is_bot": true, "login": "app/factory-bora" },
+    "body": "Fecha #214.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [
+      { "createdAt": "2026-09-17T12:00:00Z", "author": { "login": "aryrabelo" }, "body": "rodando de novo" }
+    ],
+    "createdAt": "2026-09-17T11:00:00Z",
+    "headRefName": "factory/issue-214",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 299,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T13:00:00Z",
+        "conclusion": "SUCCESS",
+        "name": "lint",
+        "startedAt": "2026-09-17T12:58:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T13:05:00Z",
+        "conclusion": "FAILURE",
+        "name": "gates",
+        "startedAt": "2026-09-17T12:58:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      }
+    ],
+    "title": "fix: parar de ler updatedAt como atividade",
+    "updatedAt": "2026-09-17T13:05:10Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/299"
+  },
+  {
+    "author": { "is_bot": true, "login": "app/factory-bora" },
+    "body": "Fecha #215.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [
+      { "createdAt": "2026-09-17T14:30:00Z", "author": { "login": "aryrabelo" }, "body": "revisando amanhã" }
+    ],
+    "createdAt": "2026-09-16T09:00:00Z",
+    "headRefName": "factory/issue-215",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 298,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T10:00:00Z",
+        "conclusion": "SUCCESS",
+        "name": "gates",
+        "startedAt": "2026-09-17T09:52:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      }
+    ],
+    "title": "feat: coluna Ready To Review atrás do timer quieto",
+    "updatedAt": "2026-09-17T14:30:04Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/298"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "Rascunho de documentação: nenhum workflow roda em docs/.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-10T08:00:00Z",
+    "headRefName": "docs/linha-de-producao",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 297,
+    "state": "OPEN",
+    "statusCheckRollup": [],
+    "title": "docs: descrever a linha de producao",
+    "updatedAt": "2026-09-17T14:55:00Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/297"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "O CI deste repositório antigo publica commit statuses, não check runs.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T06:40:00Z",
+    "headRefName": "legado/commit-status",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 296,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "StatusContext",
+        "context": "buildkite/gates",
+        "createdAt": "2026-09-17T07:00:00Z",
+        "state": "FAILURE",
+        "targetUrl": "https://buildkite.com/aryrabelo/bugtoprompt/builds/9"
+      }
+    ],
+    "title": "chore: migrar o CI legado",
+    "updatedAt": "2026-09-17T07:00:12Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/296"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "Suite ainda rodando.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T05:50:00Z",
+    "headRefName": "wip/suite-rodando",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [],
+    "mergedAt": null,
+    "number": 295,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T06:00:00Z",
+        "conclusion": "SUCCESS",
+        "name": "lint",
+        "startedAt": "2026-09-17T05:55:00Z",
+        "status": "COMPLETED",
+        "workflowName": "ci"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": null,
+        "conclusion": null,
+        "name": "gates",
+        "startedAt": "2026-09-17T06:30:00Z",
+        "status": "IN_PROGRESS",
+        "workflowName": "ci"
+      }
+    ],
+    "title": "wip: portoes da linha",
+    "updatedAt": "2026-09-17T06:30:05Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/295"
+  }
+]

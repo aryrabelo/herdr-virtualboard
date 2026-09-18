@@ -90,6 +90,13 @@ func (a *App) Resolve() error {
 	if err != nil {
 		return err
 	}
+	// The spec board is vb's, so its columns and routes have to be vb's
+	// too. Load cannot ask this — `hvb queue` renders a declared line vb
+	// has never heard of, and refusing it there would make a queue board
+	// impossible to configure — so the path that holds a workspace asks.
+	if err := cfg.ValidateSpecBoard(); err != nil {
+		return err
+	}
 	store, err := runs.Open(resolved.ID())
 	if err != nil {
 		return err

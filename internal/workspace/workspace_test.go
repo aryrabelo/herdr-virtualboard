@@ -14,7 +14,7 @@ import (
 func newWorkspace(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, status := range feature.Statuses {
+	for _, status := range feature.VB().Columns() {
 		if err := os.MkdirAll(filepath.Join(root, Dir, "features", string(status)), 0o755); err != nil {
 			t.Fatal(err)
 		}

@@ -123,12 +123,128 @@ auto = true
 auto = true
 ```
 
+## The production line
+
+`hvb queue` draws whatever line `[workflow] columns` declares. `hvb tui` never
+does: it renders VirtualBoard spec markdown, and `vb` owns those five states.
+A `.hvb.toml` naming a column `vb` does not know is refused on the spec board,
+with `vb` named as the authority; the same file opens a twelve-column queue
+board without complaint.
+
+```toml
+[workflow]
+columns = ["intake", "triage", "planning", "building", "first-review",
+           "fr-approved", "pr-processing", "pr-verification",
+           "ready-to-review", "ready-to-merge", "done", "canceled"]
+```
+
+Without this key the queue board keeps the shape it always had: the five
+VirtualBoard states plus a `canceled` tail that appears only when something is
+in it.
+
+Each declared column takes four more keys, on top of the pipeline keys above:
+
+```toml
+[columns."pr-verification"]
+title = "PR Verification"      # the column heading; derived from the name if unset
+short = "PV"                   # the breadcrumb abbreviation; derived if unset
+when  = "hvb:state:open"       # the fact that puts a card here — see below
+next  = ["building", "ready-to-review"]
+
+[columns."ready-to-review"]
+gate  = "human"                # nothing leaves without a person
+quiet = true                   # a green pull request that has gone quiet lands here
+next  = ["ready-to-merge", "building"]
+```
+
+`next` replaces VirtualBoard's transition table **on the queue board only**. It
+is what the move picker offers and what `H`/`L` obey; a move the line does not
+declare is refused naming the columns it does.
+
+Twelve columns do not fit on a terminal, so the board draws a window of them
+around the focused one and puts the whole line in a breadcrumb above, with `‹`
+and `›` where it continues off screen. `--focus-column ready-to-review` opens
+the board on one column in particular, which is how a `prefix+k` binding lands
+straight on the one column only a human unblocks.
+
+### Where a column lives
+
+Six of the columns above are facts the forge can prove. hvb reads those from
+GitHub on every refresh and **never writes them anywhere**: a card's `when`
+label is minted by the source that measured it, and a fact outranks anything
+hvb remembered.
+
+| `when` label | means |
+|---|---|
+| `hvb:state:merged` | the pull request was merged |
+| `hvb:state:canceled` | the pull request closed without merging |
+| `hvb:state:open` | the pull request is open |
+| `hvb:state:closed` | the issue is closed |
+
+The other six — `triage`, `planning`, `first-review`, `fr-approved`,
+`ready-to-review`, `ready-to-merge` — have no GitHub field at all, so hvb
+remembers them itself, in one file per repository under
+`$HVB_DATA_DIR/columns/`. Moving a card into one of those is recorded there and
+nowhere else; moving it into a column a `when` label decides is refused, because
+the next refresh would overrule the write.
+
+`hvb state show --repo owner/name --json` prints what hvb remembers as a JSON
+array, so `kit.py` and anything else can read a card's column without hvb
+writing to GitHub to publish it. A card nobody has moved has no row: its column
+is whatever the forge and the source say.
+
+### The quiet timer
+
+A pull request that is green and has gone quiet advances to the column declaring
+`quiet = true`. How long "quiet" is belongs to the repository:
+
+```toml
+[repos."aryrabelo/bugtoprompt"]
+quiet_timer = "30m"
+```
+
+Between `10m` and `24h`; outside that range the file is refused naming both
+bounds. Below ten minutes the line advances a pull request whose checks are
+still being queued — a run that has not started has no activity to measure, so
+silence looks like calm. Above a day nobody is waiting for the board.
+
+**A repository that declares no window never advances on its own.** Its cards
+hold in the open-pull-request column with `timer não configurado para
+<repo>` in the detail, because guessing a window here would move somebody's
+pull request forward with nobody's say-so.
+
+The countdown restarts on the last *measured* activity: the newest check
+timestamp or the newest comment, whichever is later. `updatedAt` deliberately
+does not count — a label change or a body edit bumps it without anyone touching
+the pull request. A red check holds the card whatever the clock says.
+
+Reading checks and comments costs seconds of GraphQL per refresh (measured
+against gh 2.97.0: 7.9s for twenty pull requests), so hvb asks for them only
+when a column declares `quiet = true`.
+
+### Dispatching an issue card
+
+`d` on a GitHub issue card hands it to `usina agente dispatch`, which cuts the
+worktree, opens the workspace and mints the scoped token. It never goes through
+the run store's own despatcher — that claims the card through `vb`, and `vb` has
+never heard of an issue number. One despatcher per card.
+
+It needs the **execution** repository, which is not the issue's own:
+
+```
+hvb queue --issues aryrabelo/ceo-bora --label project:bugtoprompt \
+          --dispatch-repo aryrabelo/bugtoprompt
+```
+
+Without `--dispatch-repo`, pressing `d` on an issue card says so rather than
+guessing which repository to branch from.
+
 ## Environment
 
 | Variable | Meaning |
 |---|---|
 | `HVB_CONFIG` | override the global config path |
-| `HVB_DATA_DIR` | where run files live (default `~/.local/share/herdr-virtualboard`) |
+| `HVB_DATA_DIR` | where run files and the column store live (default `~/.local/share/herdr-virtualboard`) |
 | `HVB_PROJECT_ROOT` | project root, as if `--root` had been passed |
 | `HVB_OWNER` | the handle hvb claims features under |
 | `HVB_VB_BIN` | the `vb` executable to use |
@@ -138,6 +254,8 @@ auto = true
 | `HVB_FORGE_TOKEN` | the Forgejo/Gitea token, when you would rather not write it into a file |
 | `HVB_TRUST_REPOSITORY` | set to `1`, `true`, `yes` or `on` to let hvb pass `--trust-repository` on worktree commands. Unset, hvb leaves the host's own repository-trust gate alone rather than answering it for you |
 | `HVB_CLI_INSTALL_DIR` | where `scripts/install-cli.sh` puts `hvb` (default `~/.local/bin`) |
+| `HVB_QUEUE_DISPATCH_REPO` | default for `hvb queue --dispatch-repo`: the execution repository `usina agente dispatch` branches from |
+| `HVB_QUEUE_FOCUS_COLUMN` | default for `hvb queue --focus-column`: the column the board opens on |
 | `NO_COLOR` | draw the board without colour |
 
 ### Set inside a dispatched agent's pane

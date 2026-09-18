@@ -46,6 +46,15 @@ const (
 	// LabelRankPrefix carries the frontier's rank, which exists only for
 	// the issues kit.py ranked.
 	LabelRankPrefix = LabelPrefix + "rank:"
+
+	// The state fact: exactly one of these is on every card. The line
+	// policy reads it instead of reading the card's column, because the
+	// column is fila's derivation and configuration can rename it, while
+	// "the issue is closed" is a fact GitHub reported. The spelling is
+	// internal/ghboard's `state:` namespace, so one vocabulary covers
+	// issues and pull requests.
+	LabelStateClosed = LabelPrefix + "state:closed"
+	LabelStateOpen   = LabelPrefix + "state:open"
 )
 
 // Runner is the single process-runner both underlying packages need. It is
@@ -186,12 +195,19 @@ func spec(card usinasrc.Card, queue usinasrc.Queue, frontier fila.Frontier) *fea
 	// feature.Status spell the same five lanes, and a test pins that.
 	column := fila.ColumnFor(card.Closed, card.Labels, owner != "", frontier.Blocked[card.Number])
 
-	labels := make([]string, 0, len(card.Labels)+4)
+	labels := make([]string, 0, len(card.Labels)+5)
 	labels = append(labels, LabelSourceIssue)
 	if origin := originLabel(queue.Origin.Source); origin != "" {
 		labels = append(labels, origin)
 	}
 	labels = append(labels, LabelIssuePrefix+strconv.Itoa(card.Number))
+	// One of the two, chosen by the one field GitHub answered with, so a
+	// card can never wear both.
+	if card.Closed {
+		labels = append(labels, LabelStateClosed)
+	} else {
+		labels = append(labels, LabelStateOpen)
+	}
 	if ranked {
 		labels = append(labels, LabelRankPrefix+strconv.Itoa(priority.Rank))
 	}

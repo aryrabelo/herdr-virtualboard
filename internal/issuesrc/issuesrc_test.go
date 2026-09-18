@@ -345,9 +345,9 @@ func TestReservedPrefixCannotBeForgedByARepositoryLabel(t *testing.T) {
 	}
 }
 
-// fila and feature spell the same five lanes. If either renames one, a card
-// would carry a status the board cannot draw, and the column would silently
-// vanish from the board rather than error.
+// fila and the vb lifecycle spell the same five lanes. If either renames one,
+// a card would carry a status the board cannot draw, and the column would
+// silently vanish from the board rather than error.
 func TestFilaColumnsAndFeatureStatusesAgree(t *testing.T) {
 	pairs := []struct {
 		column fila.Column
@@ -359,16 +359,67 @@ func TestFilaColumnsAndFeatureStatusesAgree(t *testing.T) {
 		{fila.Review, feature.Review},
 		{fila.Done, feature.Done},
 	}
-	if len(pairs) != len(feature.Statuses) {
-		t.Fatalf("feature tem %d status e este teste conhece %d", len(feature.Statuses), len(pairs))
+	if len(pairs) != len(feature.VB().Columns()) {
+		t.Fatalf("o workflow do vb tem %d colunas e este teste conhece %d", len(feature.VB().Columns()), len(pairs))
 	}
 	for _, pair := range pairs {
 		if string(pair.column) != string(pair.status) {
 			t.Errorf("fila diz %q e feature diz %q", pair.column, pair.status)
 		}
-		if !feature.Status(string(pair.column)).Valid() {
+		if !feature.VB().Has(feature.Status(string(pair.column))) {
 			t.Errorf("%q nao e um status que o board desenha", pair.column)
 		}
+	}
+}
+
+// The line policy reads the state off the label, not off the column: the
+// column is fila's derivation and a `[workflow]` declaration can rename it,
+// while "the issue is closed" is a fact GitHub reported. Exactly one of the
+// two is on every card — two would put a card in two columns at once, and
+// none would make the policy fall back on a column it cannot trust.
+func TestEveryCardCarriesTheMeasuredIssueState(t *testing.T) {
+	specs, errs := load(t, healthy(), kitPath, slug)
+	if len(errs) != 0 {
+		t.Fatalf("fila saudavel nao devia reportar problema: %v", errs)
+	}
+
+	want := map[int]string{
+		// #12 is the only closed one in the measured queue.
+		12: LabelStateClosed,
+		// #160 is open AND blocked by hitl, so its column is Blocked
+		// rather than Backlog: the state label is the state, not the
+		// column.
+		160: LabelStateOpen,
+		31:  LabelStateOpen,
+	}
+	if len(want) != len(specs) {
+		t.Fatalf("li %d cards e este teste conhece %d", len(specs), len(want))
+	}
+
+	for number, expected := range want {
+		spec := byNumber(t, specs, number)
+		var got []string
+		for _, label := range spec.Labels {
+			if strings.HasPrefix(label, LabelPrefix+"state:") {
+				got = append(got, label)
+			}
+		}
+		if len(got) != 1 {
+			t.Errorf("#%d carrega %v, quero exatamente uma label de estado", number, got)
+			continue
+		}
+		if got[0] != expected {
+			t.Errorf("#%d estado = %q, quero %q", number, got[0], expected)
+		}
+	}
+
+	// The column stays fila's answer: minting the fact must not move a
+	// card. #12 closed is Done and #160 blocked is Blocked, as before.
+	if got := byNumber(t, specs, 12).Status; got != feature.Done {
+		t.Errorf("#12 caiu em %q, quero %q: a coluna continua sendo decisao da fila", got, feature.Done)
+	}
+	if got := byNumber(t, specs, 160).Status; got != feature.Blocked {
+		t.Errorf("#160 caiu em %q, quero %q: a coluna continua sendo decisao da fila", got, feature.Blocked)
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 )
 
 // Options configure the event loop.
@@ -26,6 +28,11 @@ type Options struct {
 	// word this itself: only the command knows which world it opened and
 	// what the user would have to run to see the other one.
 	EmptyHint string
+	// FocusColumn is the column the board opens on, when the line has it.
+	// A board opened to answer one question — what is waiting for review —
+	// should not make the reader walk there first, and only the command
+	// knows which question it was opened for.
+	FocusColumn string
 }
 
 // DefaultRefresh is the background reload interval. It is slow enough not to
@@ -49,6 +56,7 @@ func Run(ctx context.Context, backend Backend, opts Options) error {
 
 	model := NewModel(backend, NewPalette(opts.Colour && term.IsTerminal(int(os.Stdout.Fd()))))
 	model.emptyHint = opts.EmptyHint
+	model.focusColumn = feature.Status(opts.FocusColumn)
 	width, height := screen.Size()
 	model.Resize(width, height)
 	model.Reload(ctx)

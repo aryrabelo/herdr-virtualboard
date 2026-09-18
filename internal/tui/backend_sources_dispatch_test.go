@@ -64,7 +64,7 @@ func dispatchingBackend(t *testing.T, cfg *config.Config, sources ...Source) *So
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	return NewSourceBackendWithDispatch("vault + repo", cfg, "ary", &dispatch.Dispatcher{
+	return NewSourceBackendWithDispatch("vault + repo", cfg, nil, "ary", &dispatch.Dispatcher{
 		Workspace: &workspace.Workspace{Root: root, Board: filepath.Join(root, workspace.Dir)},
 		Config:    cfg,
 		Store:     store,
@@ -78,7 +78,7 @@ func dispatchingBackend(t *testing.T, cfg *config.Config, sources ...Source) *So
 // reports it as a refusal instead of as a broken dispatch.
 func TestABoardWithoutTheDispatchPairStaysReadOnly(t *testing.T) {
 	card := prCard("179", "board: ler a fila real", feature.Review)
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{specs: []*feature.Spec{card}})
+	backend := NewSourceBackend("repo", nil, nil, "ary", &fakeSource{specs: []*feature.Spec{card}})
 	backend.Load(context.Background())
 	ctx := context.Background()
 
@@ -239,7 +239,7 @@ func TestLoadReturnsTheRunsThisBoardDispatched(t *testing.T) {
 // A board with no dispatcher has no store to read, and reporting a problem for
 // that would put a permanent error on a board that is working as intended.
 func TestAReadOnlyBoardReportsNoRunsAndNoProblem(t *testing.T) {
-	backend := NewSourceBackend("repo", nil, "ary", &fakeSource{
+	backend := NewSourceBackend("repo", nil, nil, "ary", &fakeSource{
 		specs: []*feature.Spec{prCard("179", "board", feature.Review)},
 	})
 

@@ -125,7 +125,7 @@ func (d *Dispatcher) route(run *runs.Run, outcome Outcome) (feature.Status, bool
 	case OutcomeSuccess:
 		want = column.OnSuccess
 	case OutcomeBlocked:
-		if feature.CanTransition(run.Status, feature.Blocked) {
+		if feature.VB().CanTransition(run.Status, feature.Blocked) {
 			return feature.Blocked, true
 		}
 		want = column.OnFailure
@@ -135,7 +135,7 @@ func (d *Dispatcher) route(run *runs.Run, outcome Outcome) (feature.Status, bool
 	if want == "" {
 		return "", false
 	}
-	status, ok := feature.ParseStatus(want)
+	status, ok := feature.VB().Parse(want)
 	return status, ok
 }
 
@@ -152,7 +152,7 @@ func (d *Dispatcher) transition(ctx context.Context, run *runs.Run, target featu
 	if spec.Status == target {
 		return target, nil
 	}
-	if !feature.CanTransition(spec.Status, target) {
+	if !feature.VB().CanTransition(spec.Status, target) {
 		return "", fmt.Errorf("cannot move %s from %s to %s: VirtualBoard does not allow that transition", run.FeatureID, spec.Status, target)
 	}
 	// Hand the feature back when it leaves an agent's hands, so the board

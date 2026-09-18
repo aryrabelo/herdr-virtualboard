@@ -16,7 +16,8 @@ func renderFeatureTable(app *App, rows []featureRow) {
 		byStatus[row.Status] = append(byStatus[row.Status], row)
 	}
 	first := true
-	for _, status := range feature.Statuses {
+	lifecycle := feature.VB()
+	for _, status := range lifecycle.Columns() {
 		group := byStatus[string(status)]
 		if len(group) == 0 {
 			continue
@@ -25,7 +26,7 @@ func renderFeatureTable(app *App, rows []featureRow) {
 			app.Print("")
 		}
 		first = false
-		app.Print("%s (%d)", strings.ToUpper(status.Title()), len(group))
+		app.Print("%s (%d)", strings.ToUpper(lifecycle.Title(status)), len(group))
 		for _, row := range group {
 			marker := " "
 			if row.ActiveRun != "" {

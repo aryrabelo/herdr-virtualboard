@@ -253,12 +253,13 @@ func (m *Model) openMovePicker() {
 	}
 	current := card.Spec.Status
 	var options []option
-	for _, status := range feature.Statuses {
+	wf := m.workflow
+	for _, status := range wf.Columns() {
 		if status == current {
 			continue
 		}
 		entry := option{Value: string(status), Label: string(status)}
-		if !feature.CanTransition(current, status) {
+		if !wf.CanTransition(current, status) {
 			entry.Disabled = true
 			entry.Reason = fmt.Sprintf("no %s → %s transition", current, status)
 		} else if column := m.backend.Config().Column(status); column.Auto {
@@ -271,9 +272,9 @@ func (m *Model) openMovePicker() {
 		subtitle: fmt.Sprintf("%s — currently %s", card.Spec.Title, current),
 		options:  options,
 		onChoose: func(value string) error {
-			target, ok := feature.ParseStatus(value)
+			target, ok := wf.Parse(value)
 			if !ok {
-				return fmt.Errorf("unknown status %q", value)
+				return fmt.Errorf("unknown column %q", value)
 			}
 			owner := ""
 			if target == feature.InProgress {
@@ -303,21 +304,16 @@ func (m *Model) shiftFocused(ctx context.Context, delta int) {
 		return
 	}
 	current := card.Spec.Status
-	index := -1
-	for position, status := range feature.Statuses {
-		if status == current {
-			index = position
-			break
-		}
-	}
+	wf := m.workflow
+	index := wf.Index(current)
 	target := index + delta
-	if index < 0 || target < 0 || target >= len(feature.Statuses) {
+	if index < 0 || target < 0 || target >= len(wf.Columns()) {
 		return
 	}
-	status := feature.Statuses[target]
-	if !feature.CanTransition(current, status) {
+	status := wf.Columns()[target]
+	if !wf.CanTransition(current, status) {
 		m.setError(fmt.Errorf("VirtualBoard does not allow %s → %s (try: %s)", current, status,
-			statusList(current.NextStatuses())))
+			statusList(wf.Next(current))))
 		return
 	}
 	owner := ""
@@ -422,6 +418,39 @@ type dispatchExplainer interface {
 	DispatchUnavailable(spec *feature.Spec) error
 }
 
+// issueDespatcher is a backend that hands a GitHub issue card to its own
+// despatcher. Optional and narrow for the same reason as dispatchExplainer:
+// the vb backend has no issue cards and must not grow a second answer.
+type issueDespatcher interface {
+	OwnsIssueDispatch(spec *feature.Spec) bool
+	DispatchIssue(ctx context.Context, spec *feature.Spec) (string, error)
+}
+
+// confirmIssueDispatch is `d` on an issue card: one question, then the usina.
+//
+// No role picker, because a role is not the usina's vocabulary — it cuts a
+// worktree, opens a bora workspace and mints a scoped token from the issue
+// itself, and a charter it would ignore is a question with no consequence.
+// A confirmation replaces it rather than nothing at all: this keystroke
+// creates a branch and a token, which is not something to do on one key.
+func (m *Model) confirmIssueDispatch(card *Card, backend issueDespatcher) {
+	m.confirm = &confirmation{
+		title: "Dispatch through the usina",
+		body: fmt.Sprintf("Hand %s — %s — to `usina agente dispatch`? It cuts a worktree, opens a workspace and mints a scoped token.",
+			card.Spec.ID, card.Spec.Title),
+		confirm: "Dispatch",
+		onYes: func() error {
+			sentence, err := backend.DispatchIssue(context.Background(), card.Spec)
+			if err != nil {
+				return err
+			}
+			m.setStatus("%s", sentence)
+			return nil
+		},
+	}
+	m.view = ViewConfirm
+}
+
 // openDispatchPicker asks which role to dispatch, pre-selecting the one the
 // feature's labels and status suggest.
 func (m *Model) openDispatchPicker() {
@@ -432,6 +461,13 @@ func (m *Model) openDispatchPicker() {
 	}
 	if card.Active != nil {
 		m.setError(fmt.Errorf("%s already has a run in progress (press x to cancel it)", card.Spec.ID))
+		return
+	}
+	// Before the roles, because an issue card needs none: asking for a
+	// charter first would refuse the dispatch the line does support on a
+	// board opened without --charters.
+	if despatcher, ok := m.backend.(issueDespatcher); ok && despatcher.OwnsIssueDispatch(card.Spec) {
+		m.confirmIssueDispatch(card, despatcher)
 		return
 	}
 	available := m.backend.Roles()

@@ -91,7 +91,7 @@ func TestLinkedIssuesAreLinksNotIdentity(t *testing.T) {
 // The tag has to reach the screen, not merely exist: both surfaces are pinned
 // against rendered text so removing the call site reddens a test.
 func TestTheKindReachesBothSurfaces(t *testing.T) {
-	model := &Model{palette: NewPalette(false)}
+	model := &Model{palette: NewPalette(false), workflow: feature.VB()}
 	card := &Card{Spec: kindSpec("PR-162", LabelSourcePR, labelPRPrefix+"162",
 		labelIssuePrefix+"85")}
 
@@ -115,7 +115,7 @@ func TestTheKindReachesBothSurfaces(t *testing.T) {
 // act on as chips. The `hvb:*` tokens are bookkeeping and must not reach any
 // row of the card, on either surface.
 func TestTheCardReadsLikeTheApprovedOne(t *testing.T) {
-	model := &Model{palette: NewPalette(false)}
+	model := &Model{palette: NewPalette(false), workflow: feature.VB()}
 	issue := kindSpec("ceo-bora#150", LabelSourceIssue, labelIssuePrefix+"150",
 		LabelPrefix+"origin:usina", LabelPrefix+"rank:1", "rumo:grilling", "project:bugtoprompt")
 	issue.Owner = "aryrabelo"

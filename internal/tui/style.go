@@ -29,6 +29,12 @@ type Palette struct {
 	Border    string
 	Accent    string
 	Warn      string
+	// Ramp colours the columns vb has never heard of. A declared line can
+	// hold a dozen of them, and returning "" left every one in the
+	// terminal's default colour — which reads as "these are not real
+	// columns" beside five that are. Indexed by board position, so a
+	// column keeps its colour from frame to frame and neighbours differ.
+	Ramp []string
 }
 
 // NewPalette chooses a palette for the environment. NO_COLOR and a
@@ -54,11 +60,20 @@ func NewPalette(colour bool) Palette {
 		Border:    "\x1b[38;5;240m",
 		Accent:    "\x1b[38;5;213m",
 		Warn:      "\x1b[38;5;203m",
+		Ramp: []string{
+			"\x1b[38;5;110m", "\x1b[38;5;150m", "\x1b[38;5;180m",
+			"\x1b[38;5;139m", "\x1b[38;5;116m",
+		},
 	}
 }
 
-// Status returns the colour for a lifecycle status.
-func (p Palette) Status(status feature.Status) string {
+// Status returns the colour for a column: vb's five have their own, and a
+// declared column takes the ramp entry for its position.
+//
+// The position is passed in rather than derived from the name because the
+// colour has to be stable for the life of a board and different from its
+// neighbours' — a hash of the name gives the first but not the second.
+func (p Palette) Status(status feature.Status, index int) string {
 	switch status {
 	case feature.Backlog:
 		return p.Backlog
@@ -71,7 +86,10 @@ func (p Palette) Status(status feature.Status) string {
 	case feature.Done:
 		return p.Done
 	default:
-		return ""
+		if len(p.Ramp) == 0 || index < 0 {
+			return ""
+		}
+		return p.Ramp[index%len(p.Ramp)]
 	}
 }
 

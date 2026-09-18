@@ -9,14 +9,18 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/virtualboard/herdr-virtualboard/internal/colunas"
 	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
+	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 	"github.com/virtualboard/herdr-virtualboard/internal/fios"
 	"github.com/virtualboard/herdr-virtualboard/internal/ghboard"
 	"github.com/virtualboard/herdr-virtualboard/internal/issuesrc"
+	"github.com/virtualboard/herdr-virtualboard/internal/linha"
 	"github.com/virtualboard/herdr-virtualboard/internal/roles"
 	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 	"github.com/virtualboard/herdr-virtualboard/internal/tui"
+	"github.com/virtualboard/herdr-virtualboard/internal/usinasrc"
 	"github.com/virtualboard/herdr-virtualboard/internal/vb"
 	"github.com/virtualboard/herdr-virtualboard/internal/workspace"
 )
@@ -53,9 +57,11 @@ func newQueueCommand(app *App) *cobra.Command {
 		frontierRepo string
 		charters     string
 		workRoot     string
+		dispatchRepo string
 		limit        int
 		window       time.Duration
 		refresh      time.Duration
+		focusColumn  string
 		colour       bool
 	)
 	cmd := &cobra.Command{
@@ -94,6 +100,23 @@ that directory exists.`,
 				return Usage("nothing to read: pass --vault with the directory holding FIOS.md, --repo with an owner/name, --issues with a CEO repository, or any combination")
 			}
 
+			// The configuration is read before the sources because it
+			// decides how one of them is built: only a line declaring a
+			// quiet column has any reader for a pull request's checks
+			// and comments, and asking gh for them costs seconds.
+			cfg, err := config.Load(vault)
+			if err != nil {
+				return err
+			}
+			// The line the board draws is the configured one, not vb's:
+			// these cards are pull requests and issues, and a
+			// `[workflow] columns` list is what declares the columns
+			// GitHub has never heard of.
+			wf, err := cfg.BoardWorkflow()
+			if err != nil {
+				return err
+			}
+
 			var sources []tui.Source
 			var names []string
 			// vaultRoot is remembered because the charters can be derived
@@ -115,7 +138,15 @@ that directory exists.`,
 				if strings.Count(repo, "/") != 1 {
 					return Usage("--repo %s is not in owner/name form", repo)
 				}
-				sources = append(sources, ghboard.New(repo, window))
+				prs := ghboard.New(repo, window)
+				// Checks and comments cost seconds of GraphQL and are
+				// only asked for when something reads them: the quiet
+				// timer is the only consumer, and it exists exactly
+				// when a column declares `quiet = true`.
+				if cfg.LineQuiet() != "" {
+					prs = prs.WithActivity()
+				}
+				sources = append(sources, prs)
 				names = append(names, repo)
 			}
 			if issues != "" {
@@ -160,21 +191,19 @@ that directory exists.`,
 				names = append(names, issues+" issues")
 			}
 
-			// The global configuration still applies: it carries the owner
-			// handle and the colour the user already chose. A vault has no
-			// project config, and a missing one is normal.
-			cfg, err := config.Load(vault)
-			if err != nil {
-				return err
-			}
-
 			dispatcher, err := queueDispatch(app, cfg, charters, workRoot, vaultRoot)
 			if err != nil {
 				return err
 			}
 
+			line, err := queueLine(cfg, wf, repo, issues, dispatchRepo, kitPath)
+			if err != nil {
+				return err
+			}
+
 			backend := tui.NewSourceBackendWithDispatch(
-				strings.Join(names, " + "), cfg, cfg.ResolveOwner(), dispatcher, sources...)
+				strings.Join(names, " + "), cfg, wf, cfg.ResolveOwner(), dispatcher, sources...).
+				WithLine(line)
 
 			// SIGTERM must reach the loop as a cancellation rather than kill
 			// the process: the terminal has to be restored first.
@@ -182,12 +211,17 @@ that directory exists.`,
 			defer stop()
 
 			return tui.Run(ctx, backend, tui.Options{
-				Refresh:   refresh,
-				Colour:    colour,
-				PaneTitle: app.paneTitle(ctx),
+				Refresh:     refresh,
+				Colour:      colour,
+				FocusColumn: focusColumn,
+				PaneTitle:   app.paneTitle(ctx),
 			})
 		},
 	}
+	// No backticks in this usage string: cobra reads a backquoted span as the
+	// flag's argument NAME, so "`usina agente dispatch`" rendered as the type
+	// of --dispatch-repo instead of as prose.
+	cmd.Flags().StringVar(&dispatchRepo, "dispatch-repo", os.Getenv("HVB_QUEUE_DISPATCH_REPO"), "execution repository the usina cuts a worktree from when d is pressed on an issue card; without it an issue card cannot dispatch (default: $HVB_QUEUE_DISPATCH_REPO)")
 	cmd.Flags().StringVar(&vault, "vault", os.Getenv("HVB_QUEUE_VAULT"), "directory holding FIOS.md and gates/ (default: $HVB_QUEUE_VAULT)")
 	cmd.Flags().StringVar(&repo, "repo", os.Getenv("HVB_QUEUE_REPO"), "GitHub repository as owner/name, read through gh (default: $HVB_QUEUE_REPO)")
 	cmd.Flags().StringVar(&issues, "issues", os.Getenv("HVB_QUEUE_ISSUES"), "CEO repository as owner/name whose issue queue to read through usina (default: $HVB_QUEUE_ISSUES)")
@@ -200,8 +234,79 @@ that directory exists.`,
 	cmd.Flags().IntVar(&limit, "limit", issuesrc.DefaultLimit, "how many issues to read at most")
 	cmd.Flags().DurationVar(&window, "window", defaultQueueWindow, "how far back pull requests count as this week's")
 	cmd.Flags().DurationVar(&refresh, "refresh", tui.DefaultRefresh, "how often to reload the board")
+	cmd.Flags().StringVar(&focusColumn, "focus-column", os.Getenv("HVB_QUEUE_FOCUS_COLUMN"), "column the board opens on, e.g. ready-to-review; ignored when the line has no such column (default: $HVB_QUEUE_FOCUS_COLUMN)")
 	cmd.Flags().BoolVar(&colour, "color", true, "use colour (NO_COLOR also disables it)")
 	return cmd
+}
+
+// queueLine assembles the production line, or nil when the board has none to
+// assemble.
+//
+// Nil is a real answer, not a failure. `hvb queue --vault` reads FIOS.md and
+// gate ledgers: no repository, no pull request, no column GitHub could have a
+// fact about. A line needs a repository whose cards it is remembering columns
+// for, which is the issue queue — the card IS the issue (ceo-bora#321), and a
+// pull request is an attribute of it.
+func queueLine(cfg *config.Config, wf *feature.Workflow, prRepo, issuesRepo, dispatchRepo, kitPath string) (*tui.Line, error) {
+	issuesRepo = strings.TrimSpace(issuesRepo)
+	dispatchRepo = strings.TrimSpace(dispatchRepo)
+	if dispatchRepo != "" {
+		if issuesRepo == "" {
+			return nil, Usage("--dispatch-repo %s needs --issues with the repository whose issue cards would be dispatched", dispatchRepo)
+		}
+		if strings.Count(dispatchRepo, "/") != 1 {
+			return nil, Usage("--dispatch-repo %s is not in owner/name form", dispatchRepo)
+		}
+	}
+	if issuesRepo == "" {
+		return nil, nil
+	}
+
+	when := map[feature.Status]string{}
+	for name, label := range cfg.LineWhen() {
+		when[feature.Status(name)] = label
+	}
+	line := &tui.Line{
+		Policy: linha.Policy{
+			Order: wf.Columns(),
+			When:  when,
+			Quiet: feature.Status(cfg.LineQuiet()),
+		},
+		Timer:     cfg.QuietTimer,
+		PRRepo:    strings.TrimSpace(prRepo),
+		IssueRepo: issuesRepo,
+	}
+
+	dir, err := runs.DataDir()
+	if err != nil {
+		return nil, err
+	}
+	// Keyed on the issue repository alone, so `hvb state show --repo` can
+	// reach the same file without reconstructing the board's whole flag set.
+	store, err := colunas.Open(dir, colunas.BoardID(issuesRepo))
+	if err != nil {
+		return nil, err
+	}
+	line.Store = store
+
+	if dispatchRepo != "" {
+		// The usina resolves which instance it is talking about from the
+		// directory it runs in, and the same derivation the issue source
+		// already makes is the right one: kit.py's own grandparent is the
+		// CEO repository. Without --kit there is nothing to derive it
+		// from and the caller has to already be there, which is exactly
+		// how issuesrc.DirRunner treats it.
+		from := ""
+		if kit := strings.TrimSpace(kitPath); kit != "" {
+			from = filepath.Dir(filepath.Dir(kit))
+		}
+		line.Issues = &usinaDespatcher{
+			run:  usinasrc.Runner(issuesrc.DirRunner(from)),
+			repo: dispatchRepo,
+			dir:  from,
+		}
+	}
+	return line, nil
 }
 
 // queueDispatch resolves the dispatch half of a queue board: the charters an

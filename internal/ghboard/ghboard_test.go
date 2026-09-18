@@ -126,13 +126,13 @@ func TestLoadClassifiesEveryPullRequestState(t *testing.T) {
 			// Merged by a GitHub App, linked to issue 168: this is the
 			// card in the approved design.
 			id: "PR-179", status: feature.Done, owner: "factory-bora[bot]",
-			labels: []string{LabelSourcePR, LabelPrefix + "pr:179", LabelPrefix + "author:factory-bora[bot]", LabelExternal, LabelPrefix + "issue:168", "status:auto-approved"},
+			labels: []string{LabelSourcePR, LabelPrefix + "pr:179", LabelPrefix + "author:factory-bora[bot]", LabelMerged, LabelExternal, LabelPrefix + "issue:168", "status:auto-approved"},
 			deps:   []string{"168"},
 		},
 		{
 			// Merged by the repository owner: not External, no issue.
 			id: "PR-176", status: feature.Done, owner: "aryrabelo",
-			labels: []string{LabelSourcePR, LabelPrefix + "pr:176", LabelPrefix + "author:aryrabelo"},
+			labels: []string{LabelSourcePR, LabelPrefix + "pr:176", LabelPrefix + "author:aryrabelo", LabelMerged},
 		},
 		{
 			// Closed without merging: terminal, but cancelled rather
@@ -152,7 +152,7 @@ func TestLoadClassifiesEveryPullRequestState(t *testing.T) {
 			// prefixed the two no longer collide: both appear, and
 			// they are distinguishable.
 			id: "PR-13899", status: feature.Review, owner: "imkp1",
-			labels: []string{LabelSourcePR, LabelPrefix + "pr:13899", LabelPrefix + "author:imkp1", LabelExternal, LabelPrefix + "issue:cli/cli#13804", "external", "gh-issue", "ready-for-review"},
+			labels: []string{LabelSourcePR, LabelPrefix + "pr:13899", LabelPrefix + "author:imkp1", LabelOpen, LabelExternal, LabelPrefix + "issue:cli/cli#13804", "external", "gh-issue", "ready-for-review"},
 			deps:   []string{"cli/cli#13804"},
 		},
 		{
@@ -162,7 +162,7 @@ func TestLoadClassifiesEveryPullRequestState(t *testing.T) {
 			// is a maintainer even though the repository belongs to an
 			// organisation nobody's login matches.
 			id: "PR-14355", status: feature.Review, owner: "williammartin",
-			labels: []string{LabelSourcePR, LabelPrefix + "pr:14355", LabelPrefix + "author:williammartin", LabelDraft},
+			labels: []string{LabelSourcePR, LabelPrefix + "pr:14355", LabelPrefix + "author:williammartin", LabelOpen, LabelDraft},
 		},
 		{
 			id: "PR-14448", status: feature.Done, owner: "vimalyad",
@@ -174,7 +174,7 @@ func TestLoadClassifiesEveryPullRequestState(t *testing.T) {
 			// labels at all, so the only way "external" can appear
 			// here is the derived badge.
 			id: "PR-2500", status: feature.Review, owner: "zzz-yu",
-			labels: []string{LabelSourcePR, LabelPrefix + "pr:2500", LabelPrefix + "author:zzz-yu", LabelExternal, LabelPrefix + "issue:spf13/cobra#706"},
+			labels: []string{LabelSourcePR, LabelPrefix + "pr:2500", LabelPrefix + "author:zzz-yu", LabelOpen, LabelExternal, LabelPrefix + "issue:spf13/cobra#706"},
 			deps:   []string{"spf13/cobra#706"},
 		},
 	}
@@ -295,7 +295,7 @@ func TestReservedPrefixCannotArriveFromTheRepository(t *testing.T) {
 	if !card.HasLabel("needs-review") {
 		t.Errorf("labels = %v, want the repository's own \"needs-review\" kept", card.Labels)
 	}
-	want := []string{LabelSourcePR, LabelPrefix + "pr:9176", LabelPrefix + "author:aryrabelo", "needs-review"}
+	want := []string{LabelSourcePR, LabelPrefix + "pr:9176", LabelPrefix + "author:aryrabelo", LabelMerged, "needs-review"}
 	if !equalStrings(card.Labels, want) {
 		t.Errorf("labels = %v, want %v", card.Labels, want)
 	}
@@ -605,5 +605,298 @@ func TestLabelSetKeepsOneOfEachInFirstInsertionOrder(t *testing.T) {
 	blank.add("   ")
 	if got := blank.slice(); got != nil {
 		t.Errorf("labels = %v, want nil for blank input", got)
+	}
+}
+
+// The fixture in testdata/pr_list_activity.json is the widened read — the same
+// `gh pr list --json` shape plus statusCheckRollup and comments — over the
+// seven cases the production line has to tell apart:
+//
+//	#301 merged, one green check, one comment newer than the check
+//	#300 closed without merging, no checks, one comment
+//	#299 open, one green check and one FAILURE, comment older than both
+//	#298 open, one green check, comment NEWER than the check
+//	#297 open, no checks and no comments, updatedAt bumped to 14:55
+//	#296 open, one legacy StatusContext in FAILURE, no CheckRun at all
+//	#295 open, one green check plus one still IN_PROGRESS
+const activityRepo = "aryrabelo/bugtoprompt"
+
+// stateLabels are the `hvb:state:` labels on a card. Collecting them by
+// prefix rather than by name is the point: a fourth state label invented later
+// still has to be alone.
+func stateLabels(spec *feature.Spec) []string {
+	var got []string
+	for _, label := range spec.Labels {
+		if strings.HasPrefix(label, LabelPrefix+"state:") {
+			got = append(got, label)
+		}
+	}
+	return got
+}
+
+func labelWithPrefix(spec *feature.Spec, prefix string) (string, bool) {
+	for _, label := range spec.Labels {
+		if strings.HasPrefix(label, prefix) {
+			return strings.TrimPrefix(label, prefix), true
+		}
+	}
+	return "", false
+}
+
+// The line reads the column off the state label, so a card wearing two of them
+// would be in two columns at once and the declaration order — not the fact —
+// would break the tie. Merged, closed-unmerged and open each produce exactly
+// one, and the sweep over every card is what makes "never two" measured rather
+// than assumed.
+func TestEveryCardCarriesExactlyOneStateLabel(t *testing.T) {
+	want := map[string]string{
+		// Merged: mergedAt decides it, even though gh reports closedAt
+		// on the same pull request.
+		"PR-179": LabelMerged, "PR-176": LabelMerged, "PR-301": LabelMerged,
+		// Closed without merging.
+		"PR-161": LabelCanceled, "PR-59": LabelCanceled, "PR-14448": LabelCanceled, "PR-300": LabelCanceled,
+		// Open, draft included: a draft is still open.
+		"PR-13899": LabelOpen, "PR-14355": LabelOpen, "PR-2500": LabelOpen,
+		"PR-299": LabelOpen, "PR-298": LabelOpen, "PR-297": LabelOpen,
+		"PR-296": LabelOpen, "PR-295": LabelOpen,
+	}
+
+	seen := map[string]int{}
+	for _, fixture := range []string{"pr_list.json", "pr_list_activity.json"} {
+		s, _ := stubSource(t, activityRepo, 0, loadFixture(t, fixture), nil)
+		specs, errs := s.Load(context.Background())
+		if len(errs) != 0 {
+			t.Fatalf("%s: unexpected errors: %v", fixture, errs)
+		}
+		for _, spec := range specs {
+			got := stateLabels(spec)
+			if len(got) != 1 {
+				t.Errorf("%s: %s carries %v, want exactly one state label", fixture, spec.ID, got)
+				continue
+			}
+			if expected, known := want[spec.ID]; !known {
+				t.Errorf("%s: %s is not in this test's table, so its state is unproved", fixture, spec.ID)
+			} else if got[0] != expected {
+				t.Errorf("%s: %s state = %q, want %q", fixture, spec.ID, got[0], expected)
+			}
+			seen[got[0]]++
+		}
+	}
+
+	// All three have to have been exercised, or the test would pass on a
+	// mutant that minted the same label for two of the states.
+	for _, label := range []string{LabelMerged, LabelCanceled, LabelOpen} {
+		if seen[label] == 0 {
+			t.Errorf("no card produced %q, so this test proves nothing about it", label)
+		}
+	}
+}
+
+// The rollup is seconds-expensive, so the plain board must not pay for it: the
+// assertion is on the argv gh was handed, because a parsed result cannot tell
+// "the field was never requested" from "the field came back empty".
+func TestWithActivityIsTheOnlyWayChecksAndCommentsAreRequested(t *testing.T) {
+	plain, plainArgs := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_activity.json"), nil)
+	if _, errs := plain.Load(context.Background()); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	joined := strings.Join(*plainArgs, " ")
+	for _, unwanted := range []string{"statusCheckRollup", "comments"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("the plain board asked gh for %q: %s", unwanted, joined)
+		}
+	}
+
+	widened, widenedArgs := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_activity.json"), nil)
+	if got := widened.WithActivity(); got != widened {
+		t.Error("WithActivity returned a different Source, so a caller that does not reassign gets the narrow read")
+	}
+	if _, errs := widened.Load(context.Background()); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	joined = strings.Join(*widenedArgs, " ")
+	for _, want := range []string{"statusCheckRollup", "comments"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("WithActivity did not ask gh for %q: %s", want, joined)
+		}
+	}
+	// The widened fields are an addition, not a replacement: dropping the
+	// base set would cost every card its author, labels and linked issue.
+	if !strings.Contains(joined, ghFields) {
+		t.Errorf("WithActivity replaced the measured field set instead of widening it: %s", joined)
+	}
+	// A read that takes 7.9s for 20 pull requests cannot run under the
+	// plain 30s budget for 200 of them.
+	if widened.timeout <= defaultTimeout {
+		t.Errorf("WithActivity timeout = %s, want more than the plain %s", widened.timeout, defaultTimeout)
+	}
+}
+
+// Activity is what the quiet timer measures, so it has to be the newest thing
+// that actually happened — and nothing else. Each row below is a different way
+// the maximum can land, including the two that must mint NO label at all.
+func TestActivityIsTheMaxOfTheLastCheckAndTheLastComment(t *testing.T) {
+	s, _ := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_activity.json"), nil)
+	s.WithActivity()
+	specs, errs := s.Load(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	cases := []struct {
+		id   string
+		want string // empty means no label at all
+		why  string
+	}{
+		{id: "PR-299", want: "2026-09-17T13:05:00Z", why: "the last check is newer than the last comment"},
+		{id: "PR-298", want: "2026-09-17T14:30:00Z", why: "the last comment is newer than the last check"},
+		{id: "PR-301", want: "2026-09-17T11:50:00Z", why: "merged, and the comment landed after the check"},
+		{id: "PR-300", want: "2026-09-17T08:30:00Z", why: "no checks at all, so the comment is the whole measurement"},
+		{id: "PR-296", want: "2026-09-17T07:00:00Z", why: "a legacy StatusContext reports in createdAt"},
+		{id: "PR-295", want: "2026-09-17T06:30:00Z", why: "a running check reports in startedAt, which is newer than the finished one"},
+		{
+			id: "PR-297", want: "",
+			// updatedAt is 2026-09-17T14:55:00Z here, the newest
+			// timestamp on the card. If it counted, this pull request
+			// would look like the most active one in the fixture.
+			why: "no checks and no comments: only updatedAt moved, and updatedAt is not activity",
+		},
+	}
+
+	for _, tc := range cases {
+		spec := specByID(t, specs, tc.id)
+		got, ok := labelWithPrefix(spec, LabelActivityPrefix)
+		switch {
+		case tc.want == "" && ok:
+			t.Errorf("%s carries %s%s but nothing was measured: %s", tc.id, LabelActivityPrefix, got, tc.why)
+		case tc.want != "" && !ok:
+			t.Errorf("%s carries no activity label, want %q: %s", tc.id, tc.want, tc.why)
+		case tc.want != "" && got != tc.want:
+			t.Errorf("%s activity = %q, want %q: %s", tc.id, got, tc.want, tc.why)
+		}
+	}
+
+	// The plain field set carries neither key, and every one of those cards
+	// has an updatedAt. None may claim activity: a mutant that fell back on
+	// updatedAt would light up all eight of them here.
+	plain, _ := stubSource(t, fixtureRepo, 0, loadFixture(t, "pr_list.json"), nil)
+	narrow, errs := plain.Load(context.Background())
+	if len(errs) != 0 || len(narrow) == 0 {
+		t.Fatalf("plain read returned %d cards and %v", len(narrow), errs)
+	}
+	for _, spec := range narrow {
+		if got, ok := labelWithPrefix(spec, LabelActivityPrefix); ok {
+			t.Errorf("%s claims activity %q from bytes that carry no check and no comment", spec.ID, got)
+		}
+	}
+}
+
+// Green is a measurement, never a default: a pull request with no checks, and
+// one whose suite is still running, both have to come back with neither label
+// so the line refuses to advance them.
+func TestCheckVerdictIsMintedOnlyFromWhatWasMeasured(t *testing.T) {
+	s, _ := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_activity.json"), nil)
+	s.WithActivity()
+	specs, errs := s.Load(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	cases := []struct {
+		id   string
+		want string // empty means neither label
+		why  string
+	}{
+		{id: "PR-301", want: LabelCheckGreen, why: "one check, completed, SUCCESS"},
+		{id: "PR-298", want: LabelCheckGreen, why: "one check, completed, SUCCESS"},
+		{id: "PR-299", want: LabelCheckRed, why: "one FAILURE beside a SUCCESS: red wins"},
+		{id: "PR-296", want: LabelCheckRed, why: "a legacy StatusContext in FAILURE is still a red check"},
+		{id: "PR-297", want: "", why: "no checks at all is not green: nobody ran anything"},
+		{id: "PR-300", want: "", why: "no checks at all"},
+		{id: "PR-295", want: "", why: "a check still IN_PROGRESS has not said anything, so the green one is not the verdict"},
+	}
+
+	for _, tc := range cases {
+		spec := specByID(t, specs, tc.id)
+		red, green := spec.HasLabel(LabelCheckRed), spec.HasLabel(LabelCheckGreen)
+		if red && green {
+			t.Errorf("%s is both red and green", tc.id)
+		}
+		got := ""
+		if red {
+			got = LabelCheckRed
+		} else if green {
+			got = LabelCheckGreen
+		}
+		if got != tc.want {
+			t.Errorf("%s check verdict = %q, want %q: %s", tc.id, got, tc.want, tc.why)
+		}
+	}
+}
+
+// GitHub serves two shapes on statusCheckRollup and they share no field name.
+// Neither the CheckRun-only decode nor a bare `status != "COMPLETED"` survives
+// this: the first reads a failing repository as having no checks, the second
+// reads a passing one as forever pending, because a StatusContext has no
+// `status` key at all.
+func TestLegacyStatusContextIsDecodedRatherThanIgnored(t *testing.T) {
+	s, _ := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_activity.json"), nil)
+	s.WithActivity()
+	specs, _ := s.Load(context.Background())
+	if got := specByID(t, specs, "PR-296"); !got.HasLabel(LabelCheckRed) {
+		t.Errorf("a StatusContext in FAILURE produced %v, want %q", got.Labels, LabelCheckRed)
+	}
+
+	// The same shape passing must read green rather than pending.
+	payload := []byte(`[{"number":296,"state":"OPEN","createdAt":"2026-09-17T06:40:00Z",` +
+		`"updatedAt":"2026-09-17T07:00:12Z","title":"legacy","author":{"login":"aryrabelo","is_bot":false},` +
+		`"statusCheckRollup":[{"__typename":"StatusContext","context":"buildkite/gates",` +
+		`"state":"SUCCESS","createdAt":"2026-09-17T07:00:00Z"}]}]`)
+	green, _ := stubSource(t, activityRepo, 0, payload, nil)
+	green.WithActivity()
+	specs, errs := green.Load(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	card := specByID(t, specs, "PR-296")
+	if !card.HasLabel(LabelCheckGreen) {
+		t.Errorf("a StatusContext in SUCCESS produced %v, want %q: an absent `status` key is absence, not pending", card.Labels, LabelCheckGreen)
+	}
+	if got, _ := labelWithPrefix(card, LabelActivityPrefix); got != "2026-09-17T07:00:00Z" {
+		t.Errorf("activity = %q, want the StatusContext's createdAt", got)
+	}
+}
+
+// The three facts the production line reads are exactly the three worth
+// forging: a repository label could otherwise declare an open pull request
+// merged (skipping every column), green (skipping the check gate), and last
+// active in 2020 (expiring the quiet timer immediately). The fixture is one
+// open pull request wearing all three.
+func TestRepositoryCannotForgeStateChecksOrActivity(t *testing.T) {
+	s, _ := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_forged_state.json"), nil)
+	s.WithActivity()
+	specs, errs := s.Load(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("got %d cards, want 1", len(specs))
+	}
+	card := specs[0]
+
+	if card.HasLabel(LabelMerged) {
+		t.Error("a repository label forged hvb:state:merged: this open pull request would land in the merged column")
+	}
+	if got := stateLabels(card); !equalStrings(got, []string{LabelOpen}) {
+		t.Errorf("state labels = %v, want %v: the measured fact is the only one that may survive", got, []string{LabelOpen})
+	}
+	if card.HasLabel(LabelCheckGreen) {
+		t.Error("a repository label forged hvb:check:green: the line would skip the check gate")
+	}
+	if got, ok := labelWithPrefix(card, LabelActivityPrefix); ok {
+		t.Errorf("a repository label forged activity %q: the quiet timer would expire on an unmeasured pull request", got)
+	}
+	if !card.HasLabel("needs-review") {
+		t.Errorf("labels = %v, want the repository's own \"needs-review\" kept", card.Labels)
 	}
 }

@@ -49,10 +49,21 @@ type Config struct {
 	Placement string `toml:"placement"`
 	// Columns is the per-status pipeline policy.
 	Columns map[string]Column `toml:"columns"`
+	// Workflow declares the columns a sources board draws.
+	Workflow Workflow `toml:"workflow"`
+	// Repos is per-repository policy, keyed by owner/name.
+	Repos map[string]Repo `toml:"repos"`
 	// Worktree configures isolated git checkouts for dispatched agents.
 	Worktree Worktree `toml:"worktree"`
 	// Forge configures pull-request creation.
 	Forge Forge `toml:"forge"`
+	// fileColumns are the column names a config FILE declared, as opposed
+	// to the five Default() ships. A declared `[workflow] columns` line
+	// replaces the board, so the built-in tables are not a mistake there
+	// — while a table someone wrote by hand for a column the line does not
+	// draw is one, and is the typo Validate has to name. The field has no
+	// TOML key: it is provenance, not settings.
+	fileColumns map[string]bool `toml:"-"`
 }
 
 // Worktree configures running an agent in an isolated git checkout rather than
@@ -162,6 +173,27 @@ type Column struct {
 	// PR opens a pull request when a run from this column succeeds. Unset
 	// inherits the global setting.
 	PR *bool `toml:"pr"`
+	// Next are the columns a card may be moved to from this one, in the
+	// order the move picker offers them. It is the declared line's own
+	// transition table: on the spec board vb's table is the authority and
+	// this key only narrows what a picker shows.
+	Next []string `toml:"next"`
+	// Gate is "human" for a column work stops in until a person moves it
+	// on. It is the declared spelling of what `auto = false` implies.
+	Gate string `toml:"gate"`
+	// Title and Short override the headings derived from the column name,
+	// for the names derivation reads wrong: "PR Verification" rather than
+	// "Pr Verification", "BLD" rather than a six-letter "BUILDI".
+	Title string `toml:"title"`
+	Short string `toml:"short"`
+	// When is the label that pins a card to this column. It is a fact the
+	// sources measured — a merged pull request, a closed issue — and it
+	// beats anything the column store remembers.
+	When string `toml:"when"`
+	// Quiet marks the column a green pull request advances to once its
+	// repository's quiet_timer has passed with no check and no comment. At
+	// most one column may declare it.
+	Quiet bool `toml:"quiet"`
 }
 
 // UseWorktree resolves the column's worktree setting against the global one.
@@ -416,8 +448,25 @@ func mergeFile(cfg *Config, path string, project bool) error {
 			field.apply()
 		}
 	}
+	if meta.IsDefined("workflow", "columns") {
+		cfg.Workflow.Columns = overlay.Workflow.Columns
+	}
+	for name, repo := range overlay.Repos {
+		base := cfg.Repos[name]
+		if meta.IsDefined("repos", name, "quiet_timer") {
+			base.QuietTimer = repo.QuietTimer
+		}
+		if cfg.Repos == nil {
+			cfg.Repos = map[string]Repo{}
+		}
+		cfg.Repos[name] = base
+	}
 	for name, column := range overlay.Columns {
 		base := cfg.Column(feature.Status(name))
+		if cfg.fileColumns == nil {
+			cfg.fileColumns = map[string]bool{}
+		}
+		cfg.fileColumns[name] = true
 		if meta.IsDefined("columns", name, "auto") {
 			base.Auto = column.Auto
 		}
@@ -450,6 +499,24 @@ func mergeFile(cfg *Config, path string, project bool) error {
 		if meta.IsDefined("columns", name, "pr") {
 			base.PR = column.PR
 		}
+		if meta.IsDefined("columns", name, "next") {
+			base.Next = column.Next
+		}
+		if meta.IsDefined("columns", name, "gate") {
+			base.Gate = column.Gate
+		}
+		if meta.IsDefined("columns", name, "title") {
+			base.Title = column.Title
+		}
+		if meta.IsDefined("columns", name, "short") {
+			base.Short = column.Short
+		}
+		if meta.IsDefined("columns", name, "when") {
+			base.When = column.When
+		}
+		if meta.IsDefined("columns", name, "quiet") {
+			base.Quiet = column.Quiet
+		}
 		if cfg.Columns == nil {
 			cfg.Columns = map[string]Column{}
 		}
@@ -458,30 +525,51 @@ func mergeFile(cfg *Config, path string, project bool) error {
 	return nil
 }
 
-// Validate rejects a configuration that would fail at dispatch time: an unknown
-// status, a routing destination VirtualBoard does not allow, or a forge kind
-// hvb has no client for.
+// Validate rejects a configuration that would fail at dispatch time: a forge
+// kind hvb has no client for, a quiet window nobody would wait for, a routing
+// destination the board cannot reach.
+//
+// It is board-independent on purpose. The rule that every column is a vb status
+// belongs to the spec board alone, and `hvb queue` renders a declared line vb
+// has never heard of — so that rule is ValidateSpecBoard, asked by the command
+// that opens the spec board. Load asks only what holds for both.
 func (c *Config) Validate() error {
 	switch git.Kind(strings.ToLower(c.Forge.Kind)) {
 	case "", git.GitHub, git.Forgejo, git.Gitea, git.GitLab, git.Unknown:
 	default:
 		return fmt.Errorf("config: forge.kind %q is not one of github, forgejo, gitea, gitlab", c.Forge.Kind)
 	}
-	for name, column := range c.Columns {
-		status, ok := feature.ParseStatus(name)
+	if err := c.validateQuietTimers(); err != nil {
+		return err
+	}
+	if err := c.validateColumnGates(); err != nil {
+		return err
+	}
+	if len(c.Workflow.Columns) > 0 {
+		return c.validateDeclaredBoard()
+	}
+	return c.validateVBBoard()
+}
+
+// validateVBBoard is the check a configuration with no declared line gets: the
+// board is vb's five states, so a column has to be one of them and a route has
+// to be a transition vb will accept. It is what Validate has always done.
+func (c *Config) validateVBBoard() error {
+	vb := feature.VB()
+	for _, name := range c.columnNames() {
+		status, ok := vb.Parse(name)
 		if !ok {
-			return fmt.Errorf("config: unknown column %q (expected one of backlog, in-progress, blocked, review, done)", name)
+			return fmt.Errorf("config: unknown column %q (expected one of %s, or a [workflow] columns list declaring %q)",
+				name, joinColumns(vb.Columns()), name)
 		}
-		for label, target := range map[string]string{"on_success": column.OnSuccess, "on_failure": column.OnFailure} {
-			if target == "" {
-				continue
-			}
-			parsed, ok := feature.ParseStatus(target)
+		for _, target := range routesOf(c.Columns[name]) {
+			parsed, ok := vb.Parse(target.target)
 			if !ok {
-				return fmt.Errorf("config: column %q %s: unknown status %q", name, label, target)
+				return fmt.Errorf("config: column %q %s: unknown status %q", name, target.label, target.target)
 			}
-			if !feature.CanTransition(status, parsed) {
-				return fmt.Errorf("config: column %q %s: VirtualBoard does not allow %s → %s", name, label, status, parsed)
+			if !vb.CanTransition(status, parsed) {
+				return fmt.Errorf("config: column %q %s: VirtualBoard does not allow %s → %s (from %s you may move to: %s)",
+					name, target.label, status, parsed, status, joinColumns(vb.Next(status)))
 			}
 		}
 	}

@@ -30,6 +30,11 @@ type Backend interface {
 	DispatchWith(ctx context.Context, spec *feature.Spec, role, kind string, worktree, pr *bool) (*runs.Run, error)
 	Cancel(ctx context.Context, runID string) error
 	Focus(ctx context.Context, runID string) error
+	// Workflow is the line the board draws: the columns, left to right,
+	// and the moves each one allows. It comes from the backend because the
+	// two boards do not agree — the spec board is vb's five states, and a
+	// queue board draws whatever `[workflow] columns` declared.
+	Workflow() *feature.Workflow
 	Roles() []roles.Role
 	Config() *config.Config
 	Owner() string
@@ -67,7 +72,12 @@ type Model struct {
 
 	view View
 
-	// columns holds the cards per status, in board order.
+	// workflow is the line this board draws, read from the backend once: a
+	// backend's line is fixed for the life of the board, and asking again
+	// on every column of every frame would buy nothing.
+	workflow *feature.Workflow
+
+	// columns holds the cards per column, in board order.
 	columns map[feature.Status][]*Card
 	// column and card are the focused positions.
 	column int
@@ -82,6 +92,11 @@ type Model struct {
 	// nothing look identical — and only the command that opened it knows
 	// where the work would otherwise live.
 	emptyHint string
+	// focusColumn is the column the caller wants the first load to open
+	// on, or "" for wherever the work is. Only the command knows: `hvb
+	// queue --focus-column ready-to-review` is a board opened to answer
+	// one question rather than a board to browse.
+	focusColumn feature.Status
 
 	detailScroll  int
 	detailSection int
@@ -96,15 +111,47 @@ type Model struct {
 
 // NewModel builds a board over a backend.
 func NewModel(backend Backend, palette Palette) *Model {
-	return &Model{
-		backend: backend,
-		palette: palette,
-		columns: map[feature.Status][]*Card{},
-		card:    map[feature.Status]int{},
-		view:    ViewBoard,
-		width:   80,
-		height:  24,
+	workflow := backend.Workflow()
+	if workflow == nil {
+		workflow = feature.VB()
 	}
+	return &Model{
+		backend:  backend,
+		palette:  palette,
+		workflow: workflow,
+		columns:  map[feature.Status][]*Card{},
+		card:     map[feature.Status]int{},
+		view:     ViewBoard,
+		width:    80,
+		height:   24,
+	}
+}
+
+// columnOrder is the board's columns, left to right: the workflow's own, minus
+// any column declared hidden while empty.
+//
+// The hidden-while-empty column is the cancelled tail. A board over a
+// VirtualBoard workspace, where no card is ever cancelled, looks exactly as it
+// did before the column existed.
+func (m *Model) columnOrder() []feature.Status {
+	declared := m.workflow.Columns()
+	hidden := 0
+	for _, status := range declared {
+		if m.workflow.HideWhenEmpty(status) && len(m.columns[status]) == 0 {
+			hidden++
+		}
+	}
+	if hidden == 0 {
+		return declared
+	}
+	order := make([]feature.Status, 0, len(declared)-hidden)
+	for _, status := range declared {
+		if m.workflow.HideWhenEmpty(status) && len(m.columns[status]) == 0 {
+			continue
+		}
+		order = append(order, status)
+	}
+	return order
 }
 
 // Resize records new terminal geometry.
@@ -140,7 +187,7 @@ func (m *Model) Reload(ctx context.Context) {
 				break
 			}
 		}
-		columns[boardStatus(spec)] = append(columns[boardStatus(spec)], card)
+		columns[spec.Status] = append(columns[spec.Status], card)
 	}
 	m.columns = columns
 	first := m.lastLoad.IsZero()
@@ -151,11 +198,29 @@ func (m *Model) Reload(ctx context.Context) {
 	case focusedID != "":
 		m.focusFeature(focusedID)
 	case first:
-		// Opening on an empty backlog while every feature is in review is
-		// a board that makes the user navigate before it tells them
-		// anything. Start where the work is.
-		m.focusFirstPopulatedColumn()
+		// The caller may have named the column to open on — that is how
+		// `prefix+k` lands on Ready To Review. Failing that, opening on
+		// an empty backlog while every card is in review makes the user
+		// navigate before the board tells them anything, so start where
+		// the work is.
+		if m.focusColumn == "" || !m.focusColumnNamed(m.focusColumn) {
+			m.focusFirstPopulatedColumn()
+		}
 	}
+}
+
+// focusColumnNamed moves the selection to a column by name, reporting whether
+// the board draws it. A column the workflow does not declare — or one hidden
+// because it is empty — is not an error: the caller asked for a place to open
+// and the board falls back to where the work is.
+func (m *Model) focusColumnNamed(status feature.Status) bool {
+	for index, candidate := range m.columnOrder() {
+		if candidate == status {
+			m.column = index
+			return true
+		}
+	}
+	return false
 }
 
 // focusFirstPopulatedColumn moves the selection to the leftmost column that has
@@ -206,11 +271,19 @@ func (m *Model) clampSelection() {
 	}
 }
 
-// FocusedStatus is the status of the focused column.
+// FocusedStatus is the status of the focused column. An out-of-range selection
+// answers with the leftmost column the board draws rather than a vb state the
+// declared line may not even have.
 func (m *Model) FocusedStatus() feature.Status {
 	order := m.columnOrder()
+	if len(order) == 0 {
+		// Every column hides while empty and every column is empty. The
+		// workflow still has a first column, and the board has to name
+		// somewhere.
+		return m.workflow.Columns()[0]
+	}
 	if m.column < 0 || m.column >= len(order) {
-		return feature.Backlog
+		return order[0]
 	}
 	return order[m.column]
 }
@@ -396,6 +469,11 @@ func (b *liveBackend) Cancel(ctx context.Context, runID string) error {
 func (b *liveBackend) Focus(ctx context.Context, runID string) error {
 	return b.dispatcher.Focus(ctx, runID)
 }
+
+// Workflow is vb's lifecycle, always. The spec board deliberately does not read
+// `[workflow] columns`: every card here is spec markdown vb owns, and a column
+// vb cannot move a spec into would be a column whose every move fails.
+func (b *liveBackend) Workflow() *feature.Workflow { return feature.VB() }
 
 func (b *liveBackend) Roles() []roles.Role    { return b.roles }
 func (b *liveBackend) Config() *config.Config { return b.config }

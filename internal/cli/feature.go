@@ -243,9 +243,10 @@ than an exit code.`,
 			if err := app.Resolve(); err != nil {
 				return err
 			}
-			target, ok := feature.ParseStatus(args[1])
+			lifecycle := feature.VB()
+			target, ok := lifecycle.Parse(args[1])
 			if !ok {
-				return Usage("unknown status %q (expected backlog, in-progress, blocked, review, or done)", args[1])
+				return Usage("unknown status %q (expected %s)", args[1], joinStatuses(lifecycle.Columns()))
 			}
 			if release && owner != "" {
 				return Usage("--release and --owner are mutually exclusive")
@@ -261,9 +262,9 @@ than an exit code.`,
 			if spec.Status == target {
 				return Usage("%s is already in %s", spec.ID, target)
 			}
-			if !feature.CanTransition(spec.Status, target) {
+			if !lifecycle.CanTransition(spec.Status, target) {
 				return Usage("VirtualBoard does not allow %s → %s (from %s you may move to: %s)",
-					spec.Status, target, spec.Status, joinStatuses(spec.Status.NextStatuses()))
+					spec.Status, target, spec.Status, joinStatuses(lifecycle.Next(spec.Status)))
 			}
 			moved, err := app.VB().Move(ctx, spec.ID, target, owner)
 			if err != nil {
@@ -462,7 +463,7 @@ func parseStatuses(values []string) (map[feature.Status]bool, error) {
 	}
 	out := map[feature.Status]bool{}
 	for _, value := range values {
-		status, ok := feature.ParseStatus(value)
+		status, ok := feature.VB().Parse(value)
 		if !ok {
 			return nil, Usage("unknown status %q", value)
 		}

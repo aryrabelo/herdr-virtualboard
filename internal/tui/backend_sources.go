@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/virtualboard/herdr-virtualboard/internal/colunas"
 	"github.com/virtualboard/herdr-virtualboard/internal/config"
 	"github.com/virtualboard/herdr-virtualboard/internal/dispatch"
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/linha"
 	"github.com/virtualboard/herdr-virtualboard/internal/roles"
 	"github.com/virtualboard/herdr-virtualboard/internal/runs"
 )
@@ -59,55 +62,70 @@ const (
 	labelGatePrefix  = LabelPrefix + "gate:"
 )
 
-// StatusCanceled is a presentation-only sixth column for work that ended
-// without landing: a pull request closed unmerged.
-//
-// It is deliberately not a feature.Status constant. VirtualBoard's lifecycle
-// has exactly five states (internal/feature/status.go:11-21) and `done` is
-// terminal by rule (status.go:68-70), so a sixth domain state would mean a new
-// transition table in a package vb also owns. Instead the sources report such
-// a card as feature.Done plus LabelCanceled, and the board splits the two
-// apart when it builds its columns — feature.Status is a string type, so the
-// TUI can mint a value that only it knows about. feature.Status("canceled")
-// answers Valid() false, which is exactly right: the move picker
-// (update.go:256-268) offers only real statuses, so no user can try to
-// transition into or out of this column.
-const StatusCanceled feature.Status = "canceled"
-
-// boardColumns is feature.Statuses plus the derived column, built once so a
-// frame costs no allocation for it.
-var boardColumns = append(append(make([]feature.Status, 0, len(feature.Statuses)+1),
-	feature.Statuses...), StatusCanceled)
-
-// boardStatus is the column a spec belongs in, which is its status everywhere
-// except for the cancelled tail of `done`.
-//
-// Both conditions are required, not just the label. `state:canceled` means one
-// thing — a pull request that closed without merging — so only a card from the
-// pull-request source can land in that column. Any other source reporting the
-// label gets Done, which is where a card whose label the board does not
-// recognise belongs.
-func boardStatus(spec *feature.Spec) feature.Status {
-	if spec.Status == feature.Done && spec.HasLabel(LabelSourcePR) && spec.HasLabel(LabelCanceled) {
-		return StatusCanceled
-	}
-	return spec.Status
-}
-
-// columnOrder is the board's columns, left to right. The derived column appears
-// only when something is in it: a board over a VirtualBoard workspace, where
-// no card is ever cancelled, looks exactly as it did before.
-func (m *Model) columnOrder() []feature.Status {
-	if len(m.columns[StatusCanceled]) == 0 {
-		return feature.Statuses
-	}
-	return boardColumns
-}
-
 // ErrReadOnly marks a mutation the board refused because the card's source owns
 // the file. The message names the owning file and the tool allowed to edit it;
 // a silent no-op would leave the user pressing a key that appears to work.
 var ErrReadOnly = errors.New("read-only source")
+
+// IssueDispatcher launches an agent on a GitHub issue card.
+//
+// It is an interface, and narrow on purpose: the usina owns the worktree, the
+// bora workspace and the scoped token a real dispatch needs, and internal/tui
+// must not import that seam to draw a board. The board hands over a card and
+// gets back the sentence to show.
+type IssueDispatcher interface {
+	DispatchIssue(ctx context.Context, spec *feature.Spec) (string, error)
+}
+
+// Line is the production-line half of a sources board: the declared policy,
+// the store holding the columns the forge has no fact for, the per-repository
+// quiet windows, and the despatcher an issue card uses.
+//
+// A board without one is the board `hvb queue` has always been — every column
+// comes from the source and every write is refused. That is not a degraded
+// mode: `hvb queue --vault` reads FIOS.md, which has no repository, no pull
+// request and no quiet window to measure.
+type Line struct {
+	// Policy is the declared line as internal/linha reads it.
+	Policy linha.Policy
+	// Store records a move into a column no fact decides. Nil refuses the
+	// move and says so, because a key that appears to work and then forgets
+	// is worse than one that explains itself.
+	Store *colunas.Store
+	// Timer answers a repository's quiet window, and answers false when the
+	// repository declared none. Nil holds every pull request with that same
+	// reason rather than inventing a window.
+	Timer func(repo string) (time.Duration, bool)
+	// PRRepo and IssueRepo name the repositories the two forge sources
+	// read, so a card is charged to the right quiet window and a stored
+	// entry can say which repository it belongs to.
+	PRRepo    string
+	IssueRepo string
+	// Issues hands an issue card to `usina agente dispatch`. Nil leaves
+	// issue cards on the ordinary refusal.
+	Issues IssueDispatcher
+	// Now is the clock the quiet window is measured against; nil is
+	// time.Now, and a test pins it.
+	Now func() time.Time
+}
+
+// repoOf is the repository a card is charged to. A pull request belongs to the
+// repository it was opened in; everything else to the issue queue the board was
+// pointed at, which is where its card came from.
+func (l *Line) repoOf(spec *feature.Spec) string {
+	if spec != nil && spec.HasLabel(LabelSourcePR) {
+		return l.PRRepo
+	}
+	return l.IssueRepo
+}
+
+// clock is Now, or the real one.
+func (l *Line) clock() time.Time {
+	if l.Now != nil {
+		return l.Now()
+	}
+	return time.Now()
+}
 
 // SourceBackend is a Backend over read-only sources: the owner's own queue
 // (FIOS.md, gates/) and the week's pull requests, rather than VirtualBoard spec
@@ -118,29 +136,57 @@ type SourceBackend struct {
 	owner   string
 	project string
 
+	// workflow is the line this board draws. It is handed in rather than
+	// read from config here so the caller decides which board it is
+	// opening: `hvb queue` renders the declared line, and a test renders
+	// whatever it is testing.
+	workflow *feature.Workflow
 	// dispatcher launches an agent on a card, or is nil on a board that
 	// only reads. Both shapes are real: `hvb queue` without --charters and
 	// --work-root has no repository to work in and no charters to pick a
 	// role from, and it must keep behaving exactly as it did — refusing
 	// with the source's own next step rather than half-dispatching.
 	dispatcher *dispatch.Dispatcher
+	// line is the production line, or nil on a board that only reflects its
+	// sources. Nil is the shape this backend shipped with and every
+	// behaviour of it is still reachable, so the two are tested apart.
+	line *Line
 
 	// origins remembers, per card, the sentence that says where it lives, so
 	// a refusal can name the file without going back to the sources. kinds is
 	// the same thing for the board as a whole, for messages that cannot name
-	// a single card.
-	mu      sync.Mutex
-	origins map[string]string
-	kinds   []string
+	// a single card. verdicts is the line's last answer per card, which is
+	// what lets Move refuse a write the next Load would overrule, and numbers
+	// is the issue number read off the card's own label — an id is an opaque
+	// string a source may mint from a hash, so it is never parsed for one.
+	mu       sync.Mutex
+	origins  map[string]string
+	kinds    []string
+	verdicts map[string]linha.Verdict
+	numbers  map[string]int
+}
+
+// WithLine turns a sources board into a production line. It is a separate step
+// rather than a constructor parameter because the two boards `hvb queue` opens
+// differ by exactly this: a vault board has no line to give it.
+func (b *SourceBackend) WithLine(line *Line) *SourceBackend {
+	b.line = line
+	return b
 }
 
 // NewSourceBackend composes already-built sources into a board. Sources are
 // injected rather than constructed from paths so the board is testable without
 // a vault on disk and without the gh binary.
-func NewSourceBackend(project string, cfg *config.Config, owner string, sources ...Source) *SourceBackend {
+//
+// A nil workflow falls back to the vb lifecycle, which is what a board with no
+// declared line has always drawn.
+func NewSourceBackend(project string, cfg *config.Config, wf *feature.Workflow, owner string, sources ...Source) *SourceBackend {
 	if cfg == nil {
 		defaults := config.Default()
 		cfg = &defaults
+	}
+	if wf == nil {
+		wf = feature.VB()
 	}
 	if owner == "" {
 		owner = cfg.ResolveOwner()
@@ -149,7 +195,7 @@ func NewSourceBackend(project string, cfg *config.Config, owner string, sources 
 		project = "queue"
 	}
 	return &SourceBackend{
-		sources: sources, config: cfg, owner: owner, project: project,
+		sources: sources, config: cfg, workflow: wf, owner: owner, project: project,
 		origins: map[string]string{},
 	}
 }
@@ -162,8 +208,8 @@ func NewSourceBackend(project string, cfg *config.Config, owner string, sources 
 //
 // The dispatcher's configuration is replaced by a copy with the vb lock off;
 // withoutVBLock says why that is not optional.
-func NewSourceBackendWithDispatch(project string, cfg *config.Config, owner string, dispatcher *dispatch.Dispatcher, sources ...Source) *SourceBackend {
-	backend := NewSourceBackend(project, cfg, owner, sources...)
+func NewSourceBackendWithDispatch(project string, cfg *config.Config, wf *feature.Workflow, owner string, dispatcher *dispatch.Dispatcher, sources ...Source) *SourceBackend {
+	backend := NewSourceBackend(project, cfg, wf, owner, sources...)
 	if dispatcher == nil {
 		return backend
 	}
@@ -219,16 +265,23 @@ func (b *SourceBackend) Load(ctx context.Context) ([]*feature.Spec, []*runs.Run,
 		problems = append(problems, errs...)
 	}
 
+	verdicts, lineProblems := b.resolveColumns(specs)
+	problems = append(problems, lineProblems...)
+
 	origins := make(map[string]string, len(specs))
+	numbers := make(map[string]int, len(specs))
 	var kinds []string
 	for _, spec := range specs {
 		origins[spec.ID] = describeOrigin(spec)
+		if number := issueNumber(spec); number > 0 {
+			numbers[spec.ID] = number
+		}
 		if kind := sourceKind(spec); kind != "" && !contains(kinds, kind) {
 			kinds = append(kinds, kind)
 		}
 	}
 	b.mu.Lock()
-	b.origins, b.kinds = origins, kinds
+	b.origins, b.kinds, b.verdicts, b.numbers = origins, kinds, verdicts, numbers
 	b.mu.Unlock()
 
 	// Runs come from the dispatcher's own store. A read-only board records
@@ -255,8 +308,126 @@ func (b *SourceBackend) Load(ctx context.Context) ([]*feature.Spec, []*runs.Run,
 	return specs, dispatched, problems
 }
 
+// resolveColumns puts every card in its column and records why. It is the
+// line's whole read path.
+//
+// The specs the sources just built are mutated in place, and that is the
+// design rather than a shortcut: a card's column is not a property of its
+// source. The source only offers a floor, a stored move can raise it, and a
+// fact GitHub can prove overrules both (internal/linha). Re-reading is safe
+// because every Load rebuilds every spec from scratch.
+//
+// The reason lands in the body because the body is what the detail pane shows,
+// and a verdict nobody can read is the same as no verdict: ceo-bora#321 asks,
+// literally, that a merged pull request rendering in Done while the store says
+// Ready To Review say so where a reader looks.
+func (b *SourceBackend) resolveColumns(specs []*feature.Spec) (map[string]linha.Verdict, []error) {
+	if b.line == nil {
+		return nil, nil
+	}
+	var problems []error
+	stored := map[string]string{}
+	if b.line.Store != nil {
+		columns, err := b.line.Store.Columns()
+		if err != nil {
+			// An unreadable store costs the overrides, not the board:
+			// every fact is still measured and every card still draws.
+			problems = append(problems, fmt.Errorf(
+				"stored columns unread, so only measured facts place a card: %w", err))
+		} else {
+			stored = columns
+		}
+	}
+	now := b.line.clock()
+	verdicts := make(map[string]linha.Verdict, len(specs))
+	for _, spec := range specs {
+		repo := b.line.repoOf(spec)
+		var (
+			timer time.Duration
+			set   bool
+		)
+		if b.line.Timer != nil {
+			timer, set = b.line.Timer(repo)
+		}
+		verdict := linha.Resolve(linha.Input{
+			Policy:   b.line.Policy,
+			Labels:   spec.Labels,
+			Source:   spec.Status,
+			Stored:   feature.Status(stored[spec.ID]),
+			Repo:     repo,
+			Timer:    timer,
+			TimerSet: set,
+			Now:      now,
+		})
+		spec.Status = verdict.Column
+		if verdict.Reason != "" {
+			spec.Body = appendColumnReason(spec.Body, verdict)
+		}
+		verdicts[spec.ID] = verdict
+	}
+	return verdicts, problems
+}
+
+// appendColumnReason writes the line's own sentence into the card body.
+func appendColumnReason(body string, verdict linha.Verdict) string {
+	sentence := fmt.Sprintf("Coluna: %s — %s", verdict.Column, verdict.Reason)
+	if body = strings.TrimRight(body, "\n"); body == "" {
+		return sentence
+	}
+	return body + "\n\n" + sentence
+}
+
+// Move records a card's column in hvb's own store, or refuses and names who
+// owns the answer instead.
+//
+// Four refusals, and each one is a different mistake:
+//
+//   - no line at all: every column comes from a file with its own author,
+//     which is the board `hvb queue` has always been;
+//   - a column the line does not draw: the answer would be unreachable;
+//   - a column a fact decides: the next Load would overrule the write, so
+//     storing it is a lie with a timestamp on it;
+//   - a transition the line does not declare: the picker greys those out, but
+//     H/L and a direct call reach Move without asking the picker.
+//
+// Nothing here writes to GitHub. That is the point of decision C: a column
+// GitHub has no field for is remembered by hvb, and a column it does have a
+// field for is read from GitHub and never written.
 func (b *SourceBackend) Move(_ context.Context, id string, target feature.Status, _ string) error {
-	return b.refuse(fmt.Sprintf("move %s to %s", id, target), id)
+	if b.line == nil {
+		return b.refuse(fmt.Sprintf("move %s to %s", id, target), id)
+	}
+	if !b.workflow.Has(target) {
+		return fmt.Errorf("the board cannot move %s to %s: the line does not draw that column (it draws: %s)",
+			id, target, statusList(b.workflow.Columns()))
+	}
+	if label, ok := b.line.Policy.When[target]; ok {
+		return fmt.Errorf("the board cannot move %s to %s: %s decides that column and only the forge sets it — the board stays read-only for GitHub (%w)",
+			id, target, label, ErrReadOnly)
+	}
+	b.mu.Lock()
+	verdict, known := b.verdicts[id]
+	number := b.numbers[id]
+	b.mu.Unlock()
+	switch {
+	case known && verdict.Pinned:
+		return fmt.Errorf("the board cannot move %s to %s: a measured fact holds it in %s (%s), and the next refresh would overrule the move",
+			id, target, verdict.Column, verdict.Reason)
+	case known && !b.workflow.CanTransition(verdict.Column, target):
+		return fmt.Errorf("the line does not allow %s → %s (from %s you may move to: %s)",
+			verdict.Column, target, verdict.Column, statusList(b.workflow.Next(verdict.Column)))
+	}
+	if b.line.Store == nil {
+		return fmt.Errorf("the board cannot move %s to %s: this board has no column store to remember it in (%w)",
+			id, target, ErrReadOnly)
+	}
+	return b.line.Store.Set(colunas.Entry{
+		ID:     id,
+		Repo:   b.line.IssueRepo,
+		Issue:  number,
+		Column: string(target),
+		SetBy:  b.owner,
+	})
 }
 
 func (b *SourceBackend) Create(_ context.Context, title string, _ []string, _ string) (string, error) {
@@ -268,6 +439,31 @@ func (b *SourceBackend) SetField(_ context.Context, id, key, value string) error
 	return b.refuse(fmt.Sprintf("set %s=%q on %s", key, value, id), id)
 }
 
+// OwnsIssueDispatch reports whether this card goes to the line's own
+// despatcher rather than to the run store's.
+//
+// "Um despachante por card" (ceo-bora#321): a GitHub issue is dispatched by
+// `usina agente dispatch`, which cuts the worktree, opens the bora workspace
+// and mints the scoped token for it. dispatch.Dispatcher keeps everything
+// else, and that narrowing is deliberate rather than literal-minded. The
+// issue's acceptance criterion names issue cards only, and a pull-request or
+// FIOS card dispatched through --charters/--work-root is behaviour that works
+// today and that the issue never asked to delete — so the rule is enforced
+// where it was written, one card kind wide.
+func (b *SourceBackend) OwnsIssueDispatch(spec *feature.Spec) bool {
+	return b.line != nil && b.line.Issues != nil && spec != nil && spec.HasLabel(LabelSourceIssue)
+}
+
+// DispatchIssue hands an issue card to the line's despatcher and returns the
+// sentence the board shows.
+func (b *SourceBackend) DispatchIssue(ctx context.Context, spec *feature.Spec) (string, error) {
+	if !b.OwnsIssueDispatch(spec) {
+		return "", fmt.Errorf("the board cannot dispatch %s through the usina: this board was opened without --dispatch-repo, so no repository names the checkout the usina would cut a worktree from",
+			specID(spec))
+	}
+	return b.line.Issues.DispatchIssue(ctx, spec)
+}
+
 // Dispatch launches an agent on a card when this board was given a repository
 // to work in and charters to pick a role from, and refuses otherwise.
 //
@@ -275,7 +471,16 @@ func (b *SourceBackend) SetField(_ context.Context, id, key, value string) error
 // directory to run in, and dispatch would claim the feature through vb, which
 // does not know these ids. Naming the source's own next step is more useful
 // than a run that dies on a lock error, so that is what the board does.
+//
+// An issue card is refused outright, whatever the wiring: the run store's
+// despatcher claims through vb, and vb has never heard of an issue number.
+// Checking here rather than only in the key handler is what makes the rule
+// hold for every caller — offerDispatch reaches Dispatch without going through
+// the picker.
 func (b *SourceBackend) Dispatch(ctx context.Context, spec *feature.Spec, role, kind string, force bool) (*runs.Run, error) {
+	if err := b.refuseRunDispatch(spec); err != nil {
+		return nil, err
+	}
 	if b.dispatcher == nil {
 		return nil, b.refuseDispatch(spec, role)
 	}
@@ -283,12 +488,34 @@ func (b *SourceBackend) Dispatch(ctx context.Context, spec *feature.Spec, role, 
 }
 
 func (b *SourceBackend) DispatchWith(ctx context.Context, spec *feature.Spec, role, kind string, worktree, pr *bool) (*runs.Run, error) {
+	if err := b.refuseRunDispatch(spec); err != nil {
+		return nil, err
+	}
 	if b.dispatcher == nil {
 		return nil, b.refuseDispatch(spec, role)
 	}
 	return b.dispatcher.Start(ctx, dispatch.Request{
 		Spec: spec, Role: role, Kind: kind, Worktree: worktree, PR: pr,
 	})
+}
+
+// refuseRunDispatch is the one-despatcher-per-card rule, spelled once so both
+// dispatch entry points cannot drift apart.
+func (b *SourceBackend) refuseRunDispatch(spec *feature.Spec) error {
+	if !b.OwnsIssueDispatch(spec) {
+		return nil
+	}
+	return fmt.Errorf("%s is a GitHub issue: it dispatches through `usina agente dispatch`, never through the run store's despatcher (press d on the card)",
+		specID(spec))
+}
+
+// specID is a card's id, or a stand-in when there is no card at all, so a
+// refusal never reads "cannot dispatch : …".
+func specID(spec *feature.Spec) string {
+	if spec == nil {
+		return "no card"
+	}
+	return spec.ID
 }
 
 // Cancel and Focus follow the runs, not the cards: a run this board dispatched
@@ -331,6 +558,9 @@ func (b *SourceBackend) DispatchUnavailable(spec *feature.Spec) error {
 }
 
 func (b *SourceBackend) Config() *config.Config { return b.config }
+
+// Workflow is the line this board draws, which is the one it was built with.
+func (b *SourceBackend) Workflow() *feature.Workflow { return b.workflow }
 
 func (b *SourceBackend) Owner() string { return b.owner }
 
@@ -414,6 +644,23 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// issueNumber is the issue a card IS, read off its own label.
+//
+// Only an issue card answers. internal/ghboard mints the same label prefix for
+// the issue a pull request CLOSES, so reading it from a pull request would file
+// that card under an issue it is not — and the store's Issue field is what a
+// caller of `hvb state show` joins on.
+func issueNumber(spec *feature.Spec) int {
+	if spec == nil || !spec.HasLabel(LabelSourceIssue) {
+		return 0
+	}
+	number, err := strconv.Atoi(strings.TrimSpace(labelValue(spec, labelIssuePrefix)))
+	if err != nil {
+		return 0
+	}
+	return number
 }
 
 // describeOrigin turns a card into the sentence a refusal shows. It reads only

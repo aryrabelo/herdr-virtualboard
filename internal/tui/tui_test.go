@@ -20,6 +20,8 @@ type fakeBackend struct {
 	specs []*feature.Spec
 	runs  []*runs.Run
 	cfg   config.Config
+	// wf is the line this backend draws, or nil for vb's five states.
+	wf *feature.Workflow
 
 	moves     []string
 	created   []string
@@ -121,6 +123,13 @@ func (f *fakeBackend) Roles() []roles.Role {
 func (f *fakeBackend) Config() *config.Config { return &f.cfg }
 func (f *fakeBackend) Owner() string          { return "tester" }
 func (f *fakeBackend) ProjectName() string    { return "demo" }
+
+func (f *fakeBackend) Workflow() *feature.Workflow {
+	if f.wf != nil {
+		return f.wf
+	}
+	return feature.VB()
+}
 
 func spec(id, title string, status feature.Status, labels ...string) *feature.Spec {
 	return &feature.Spec{Frontmatter: feature.Frontmatter{
@@ -225,9 +234,9 @@ func TestNarrowTerminalUsesTheSingleColumnLayout(t *testing.T) {
 	if wide.compact() {
 		t.Error("140 columns should not be compact")
 	}
-	narrow := newTestModel(t, backend, 44, 20)
+	narrow := newTestModel(t, backend, 40, 20)
 	if !narrow.compact() {
-		t.Fatal("44 columns should be compact")
+		t.Fatal("40 columns has room for one board column, so the board must show one")
 	}
 	out := screen(narrow)
 	if !strings.Contains(out, "Only thing") {

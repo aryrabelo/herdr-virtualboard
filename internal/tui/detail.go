@@ -48,7 +48,7 @@ func (m *Model) detailLines(card *Card, width int) []string {
 	}
 	add("%s  %s", heading, paint(m.palette.Bold, spec.Title))
 	rule()
-	add("%s  %s", paint(m.palette.Dim, "status    "), paint(m.palette.Status(spec.Status), string(spec.Status)))
+	add("%s  %s", paint(m.palette.Dim, "status    "), paint(m.palette.Status(spec.Status, m.workflow.Index(spec.Status)), string(spec.Status)))
 	add("%s  %s", paint(m.palette.Dim, "owner     "), orDash(spec.Owner))
 	add("%s  %s   %s  %s", paint(m.palette.Dim, "priority  "), orDash(spec.Priority),
 		paint(m.palette.Dim, "complexity"), orDash(spec.Complexity))
@@ -212,8 +212,8 @@ func (m *Model) renderHelp() []string {
 	add("  %s", paint(m.palette.Dim, "in the project or in an isolated worktree branch"))
 
 	section("The lifecycle")
-	for _, status := range feature.Statuses {
-		next := status.NextStatuses()
+	for _, status := range m.workflow.Columns() {
+		next := m.workflow.Next(status)
 		labels := make([]string, len(next))
 		for index, candidate := range next {
 			labels[index] = string(candidate)
@@ -222,7 +222,8 @@ func (m *Model) renderHelp() []string {
 		if target == "" {
 			target = "— terminal"
 		}
-		add("  %s → %s", paint(m.palette.Status(status), pad(string(status), 12)), target)
+		add("  %s → %s", paint(m.palette.Status(status, m.workflow.Index(status)),
+			pad(string(status), 16)), target)
 	}
 
 	section("This board")

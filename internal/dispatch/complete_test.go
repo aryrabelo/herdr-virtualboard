@@ -31,7 +31,7 @@ type harness struct {
 func newHarness(t *testing.T, statuses map[string]feature.Status, herdrScript string) *harness {
 	t.Helper()
 	root := t.TempDir()
-	for _, status := range feature.Statuses {
+	for _, status := range feature.VB().Columns() {
 		if err := os.MkdirAll(filepath.Join(root, workspace.Dir, "features", string(status)), 0o755); err != nil {
 			t.Fatal(err)
 		}

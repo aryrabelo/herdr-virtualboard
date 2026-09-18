@@ -3,3 +3,6 @@
 coverage.out
 coverage.html
 .DS_Store
+/.local/
+/.usina-shims/
+/.usina-despacho.json

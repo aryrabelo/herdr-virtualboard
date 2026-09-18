@@ -33,6 +33,12 @@ const (
 	// LabelCheckRed means at least one check failed, which is a reason to
 	// go back to building rather than forward to review.
 	LabelCheckRed = "hvb:check:red"
+	// LabelCheckGreen is the POSITIVE fact the quiet timer needs: every
+	// check the forge reported concluded in success. The source mints it
+	// only for an explicit success — never for a pending, expected or
+	// absent check — because the timer's job is to advance a pull request
+	// nobody needs to look at, and "nothing has run yet" is not that.
+	LabelCheckGreen = "hvb:check:green"
 	// LabelActivityPrefix carries the last MEASURED activity on the pull
 	// request (a check or a comment) as RFC3339. It is not `updatedAt`: a
 	// label edit bumps that without anyone touching the pull request.
@@ -124,6 +130,15 @@ func pinnedBy(in Input, column feature.Status, label string) Verdict {
 	}
 	if hasLabel(in.Labels, LabelCheckRed) {
 		return hold("check vermelho: retrocesso a building disponível")
+	}
+	// Green is REQUIRED, not merely "not red". A pull request whose checks
+	// are still queued, whose forge reported none at all, or whose suite
+	// never finished carries no verdict label either way — and advancing
+	// it on the absence of a failure is how a board sends an untested
+	// branch to review on a timer. The positive fact is the only thing
+	// that means somebody's CI said yes.
+	if !hasLabel(in.Labels, LabelCheckGreen) {
+		return hold("sem check verde: o avanço exige sucesso medido, não ausência de vermelho")
 	}
 	activity, ok := ParseActivity(in.Labels)
 	if !ok {

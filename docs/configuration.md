@@ -195,18 +195,39 @@ is whatever the forge and the source say.
 
 ### The quiet timer
 
-A pull request that is green and has gone quiet advances to the column declaring
-`quiet = true`. How long "quiet" is belongs to the repository:
+A pull request advances to the column declaring `quiet = true` only when **both**
+facts hold: the forge said green (`hvb:check:green`, minted for an explicit
+success and for nothing else), and its last *measured* activity is at least a
+window old. Anything less holds the card in the open-pull-request column and
+says which half is missing in the detail:
+
+| what the card carries | what happens |
+|---|---|
+| green, quiet for ≥ the window | advances, `verde e quieto por <tempo> (timer <janela> do repo <repo>)` |
+| green, quiet for less | holds, `quieto há <tempo>, faltam <resto> de <janela>` |
+| no green — checks queued, expected, or none reported | holds, `sem check verde: o avanço exige sucesso medido, não ausência de vermelho` |
+| `hvb:check:red` | holds, `check vermelho: retrocesso a building disponível` |
+| no readable `hvb:activity:` stamp | holds, `sem atividade medida na PR` |
+
+**Absence of a red check is not green.** A pull request nobody has tested never
+advances on a timer, however long it sits: the window is there to skip the
+second look at work CI already approved, not to approve it.
+
+How long "quiet" is belongs to the repository:
 
 ```toml
 [repos."aryrabelo/bugtoprompt"]
 quiet_timer = "30m"
 ```
 
-Between `10m` and `24h`; outside that range the file is refused naming both
-bounds. Below ten minutes the line advances a pull request whose checks are
+A declared window is between `10m` and `24h`; any other value is refused naming
+both bounds. Below ten minutes the line advances a pull request whose checks are
 still being queued — a run that has not started has no activity to measure, so
 silence looks like calm. Above a day nobody is waiting for the board.
+
+Zero is the one value outside those bounds the file accepts, because it is not
+a window at all but the explicit off switch: `quiet_timer = "0s"` loads, and is
+read exactly like declaring no key.
 
 **A repository that declares no window never advances on its own.** Its cards
 hold in the open-pull-request column with `timer não configurado para

@@ -23,12 +23,45 @@ func TestClosedWinsOverEveryLabel(t *testing.T) {
 	}
 }
 
-// TestGrillingOutranksAssignee: a decision under examination is under review
-// even when someone owns it.
-func TestGrillingOutranksAssignee(t *testing.T) {
-	got := ColumnFor(false, []string{LabelGrilling}, true, false)
-	if got != Review {
-		t.Fatalf("rumo:grilling com assignee deu %q; grilling decide antes de assignee: Review", got)
+// TestGrillingDecidesNoColumnAndTheStateDoes replaces
+// TestGrillingOutranksAssignee, which asserted `rumo:grilling` -> Review and
+// so pinned a defect as a feature: it guaranteed that a decision KIND kept
+// deciding a lifecycle STATE. Measured on the owner's board 2026-09-18, that
+// mapping put 7 of 33 cards in REVIEW, and 6 of those 7 had no pull request at
+// all — nothing in this package reads a PR.
+func TestGrillingDecidesNoColumnAndTheStateDoes(t *testing.T) {
+	if got := ColumnFor(false, []string{LabelGrilling}, true, false); got != InProgress {
+		t.Errorf("rumo:grilling com assignee deu %q; o estado decide, e ele tem dono: InProgress", got)
+	}
+	if got := ColumnFor(false, []string{LabelGrilling, "folha"}, false, false); got != Backlog {
+		t.Errorf("rumo:grilling aberto e sem dono deu %q; era o caso dos 7 cards: Backlog", got)
+	}
+}
+
+// TestNoLabelCanReachReviewBecauseReviewMeansAPullRequest is the invariant the
+// change above buys, and it is the point of the whole fix: on an issue queue
+// Review is unreachable, so the column means one thing only. It is filled by
+// the pull-request source instead — ghboard maps an open PR to feature.Review
+// (ghboard.go:332) — and a composing board therefore shows in REVIEW exactly
+// what has a PR open. Any future label that wants a column has to name a
+// STATE and be added here on purpose.
+func TestNoLabelCanReachReviewBecauseReviewMeansAPullRequest(t *testing.T) {
+	labels := []string{LabelHITL, LabelGrilling, "rumo:task", "rumo:map", "folha", "projeto"}
+	for _, closed := range []bool{false, true} {
+		for _, assigned := range []bool{false, true} {
+			for _, blocked := range []bool{false, true} {
+				for _, label := range labels {
+					got := ColumnFor(closed, []string{label}, assigned, blocked)
+					if got == Review {
+						t.Errorf("label %q (closed=%v assigned=%v blocked=%v) alcancou Review; Review e' das PRs, nao de label de issue",
+							label, closed, assigned, blocked)
+					}
+				}
+				if got := ColumnFor(closed, labels, assigned, blocked); got == Review {
+					t.Errorf("todas as labels juntas (closed=%v assigned=%v blocked=%v) alcancaram Review", closed, assigned, blocked)
+				}
+			}
+		}
 	}
 }
 

@@ -19,7 +19,10 @@ const (
 	// outranks an assignee: every HITL issue in the owner's queue is
 	// already assigned to him and is still stuck.
 	LabelHITL = "hitl"
-	// LabelGrilling marks a decision under examination, not work in flight.
+	// LabelGrilling marks a decision under examination. It is a DECISION
+	// KIND, not a lifecycle state, and it deliberately decides no column —
+	// see ColumnFor. It is exported because internal/roles maps it to the
+	// charter an agent adopts, which is the axis this label belongs to.
 	LabelGrilling = "rumo:grilling"
 )
 
@@ -31,9 +34,21 @@ const (
 //	closed          -> Done        (before any label; a closed HITL is done)
 //	label hitl      -> Blocked     (outranks assignee)
 //	frontierBlocked -> Blocked
-//	rumo:grilling   -> Review      (outranks assignee)
 //	assigned        -> InProgress
 //	otherwise       -> Backlog
+//
+// Only a label that names a STATE may decide a column. `hitl` qualifies: it
+// says the card is stuck on a human, which is why it outranks an assignee.
+// The owner's `rumo:*` labels do not, and one of them used to: `rumo:grilling`
+// mapped to Review above `assigned`, which put 7 of his 33 cards in REVIEW
+// with no pull request anywhere — 6 of the 7 had none at all (measured
+// 2026-09-18), because nothing here reads a PR. His own convention
+// (`specs/usina-fonte-unica.md`) separates the two axes by name: `estágio` is
+// ideia/spec/folha, `decisão` is rumo:research|grilling|prototype|task|projeto.
+// Reading a decision KIND as a lifecycle STATE also let a grilling card move
+// review -> done without ever having been built. The kind still shows on the
+// card's label line and still picks the agent's charter (internal/roles),
+// which is the axis that asks "what kind of work is this".
 func ColumnFor(closed bool, labels []string, assigned bool, frontierBlocked bool) Column {
 	if closed {
 		return Done
@@ -43,9 +58,6 @@ func ColumnFor(closed bool, labels []string, assigned bool, frontierBlocked bool
 	}
 	if frontierBlocked {
 		return Blocked
-	}
-	if hasLabel(labels, LabelGrilling) {
-		return Review
 	}
 	if assigned {
 		return InProgress

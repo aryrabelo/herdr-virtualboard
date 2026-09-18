@@ -11,10 +11,11 @@
 // log line nobody reads. Nothing here ever returns an empty queue without
 // saying why.
 //
-// A `recusa` is data, not a failure. The route answers per artefact area, and
-// an area the owner never configured comes back as an object carrying the
-// phrase to declare; that phrase lands in Queue.RouteRefusal and the queue is
-// read anyway, because a refused sibling area says nothing about the issues.
+// A `recusa` is data, not a failure. The route answers one object per artefact
+// area, and an area the owner never configured comes back carrying the phrase
+// to declare; the queue is read anyway, because a refused sibling area says
+// nothing about the issues. Only the `issues` area's own phrase reaches
+// Queue.RouteRefusal — see that field for why a sibling's never does.
 //
 // Absence is absence. A card is built only from fields the source measured: an
 // issue with no recognisable state or number costs the list rather than
@@ -29,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -72,9 +72,15 @@ type Origin struct {
 //
 // Repo is the repository the route resolved as the owner of the issues, which
 // is the CEO repository itself when the route could not name one — and then
-// Origin.Reason says so. RouteRefusal carries the route's own `recusa` phrase
-// verbatim (several joined by "; ") and is empty when the route refused
-// nothing.
+// Origin.Reason says so. RouteRefusal carries the `recusa` phrase of the
+// route's `issues` area verbatim, and is empty when that area refused nothing
+// — including when a sibling area did.
+//
+// Per area, because a sibling's refusal is not about this queue and reporting
+// it is a false alarm: measured 2026-09-17 against aryrabelo/ceo-bora, `kb` is
+// absent from the usina-config, so EVERY route of that CEO refuses `kb`, and
+// the kanban never reads `kb` (that is the team's KB). Joining the areas lit a
+// permanent problem on the board for an area it does not even display.
 type Queue struct {
 	Repo         string
 	Cards        []Card
@@ -164,7 +170,7 @@ func resolveRoute(run Runner, ceoRepo string) route {
 			"usinasrc: saida de usina rota show nao e JSON (%v): fila lida do proprio %s", err, ceoRepo)}
 	}
 
-	refusal := collectRefusals(fields)
+	refusal := refusalFor(fields, areaIssues)
 	repo, ok := issuesRepo(fields)
 	if !ok {
 		return route{repo: ceoRepo, refusal: refusal, reason: fmt.Sprintf(
@@ -173,11 +179,16 @@ func resolveRoute(run Runner, ceoRepo string) route {
 	return route{repo: repo, refusal: refusal}
 }
 
+// areaIssues is the route's key this package cares about: the artefact area
+// that names the repository the queue lives in, and the only one whose
+// `recusa` is about the queue.
+const areaIssues = "issues"
+
 // issuesRepo reads the route's `issues` key, which is the repository the queue
 // lives in. The key is absent, or an object rather than a string, exactly when
 // the route has nothing to say about issues; both are "not measured" here.
 func issuesRepo(fields map[string]json.RawMessage) (string, bool) {
-	raw, ok := fields["issues"]
+	raw, ok := fields[areaIssues]
 	if !ok {
 		return "", false
 	}
@@ -189,30 +200,22 @@ func issuesRepo(fields map[string]json.RawMessage) (string, bool) {
 	return repo, repo != ""
 }
 
-// collectRefusals gathers every `recusa` phrase the route emitted, from any
-// top-level key. The phrases are copied verbatim — each already names its own
-// area ("'kb' ausente ou nao-mapping…") — in key order, so the same answer
-// always produces the same string.
-func collectRefusals(fields map[string]json.RawMessage) string {
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
+// refusalFor reads one area's own `recusa` phrase, verbatim. It is empty when
+// the area is absent, when it answered with a repository instead of a refusal,
+// or when it refused nothing — all three being "this area has no complaint
+// about itself", and none of them a statement about any sibling area.
+func refusalFor(fields map[string]json.RawMessage, area string) string {
+	raw, ok := fields[area]
+	if !ok {
+		return ""
 	}
-	sort.Strings(keys)
-
-	phrases := make([]string, 0, len(keys))
-	for _, key := range keys {
-		var area struct {
-			Recusa string `json:"recusa"`
-		}
-		if err := json.Unmarshal(fields[key], &area); err != nil {
-			continue
-		}
-		if phrase := strings.TrimSpace(area.Recusa); phrase != "" {
-			phrases = append(phrases, phrase)
-		}
+	var decoded struct {
+		Recusa string `json:"recusa"`
 	}
-	return strings.Join(phrases, "; ")
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(decoded.Recusa)
 }
 
 // listViaUsina asks the preferred source for the cards.
@@ -377,7 +380,7 @@ func ExecRunnerIn(dir, name string, args ...string) ([]byte, error) {
 	cmd.Stdin = nil
 
 	if err := cmd.Run(); err != nil {
-		return nil, runError(name, err, stderr.Bytes())
+		return nil, runError(name, execTimeout, ctx.Err(), err, stderr.Bytes())
 	}
 	return stdout.Bytes(), nil
 }
@@ -387,7 +390,17 @@ func ExecRunnerIn(dir, name string, args ...string) ([]byte, error) {
 // no cwd", measured); gh prints "not logged in" the same way. That text is the
 // useful part — the exit status alone is not — and it is what reaches
 // Origin.Reason, which is why it is bounded here.
-func runError(name string, runErr error, stderr []byte) error {
+//
+// The deadline is the one failure with no diagnosis to keep: the context kills
+// the child, so stderr is empty and ExitCode() is -1, and forwarding that puts
+// "usina saiu -1: signal: killed" on the board — a Reason naming neither the
+// deadline nor its value. ctxErr is the only witness that the kill was ours,
+// so it is read first; a child that exited on its own keeps its own text.
+func runError(name string, timeout time.Duration, ctxErr, runErr error, stderr []byte) error {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("%s passou do prazo de %s e foi interrompido antes de responder", name, timeout)
+	}
+
 	reason := strings.TrimSpace(string(stderr))
 	if reason == "" {
 		reason = runErr.Error()
@@ -405,9 +418,12 @@ func runError(name string, runErr error, stderr []byte) error {
 
 const (
 	// execTimeout bounds one child call. `usina issue list` makes its own gh
-	// requests and took 4.1s for three issues (measured), so it is seconds
-	// slow by design; a refresh that hangs past this is worth reporting.
-	execTimeout = 60 * time.Second
+	// requests and took 4.1s for three issues (measured), so its cost grows
+	// with the project the same way `kit.py fronteira` does — 69s for 33 open
+	// cards there (measured) — and 60s was already inside reach of a project
+	// this size. 3 minutes keeps the same headroom as fila.execTimeout, and
+	// stays bounded so a stuck refresh reports instead of hanging forever.
+	execTimeout = 3 * time.Minute
 	// maxStderrBytes caps how much of the child's stderr reaches a Reason the
 	// board has to render.
 	maxStderrBytes = 512

@@ -101,9 +101,14 @@ func (d *Dispatcher) Start(ctx context.Context, req Request) (*runs.Run, error) 
 		return nil, fmt.Errorf("dispatch: no feature given")
 	}
 	// Input is validated before the gate: a typo in --harness should not
-	// need a running Herdr to be reported.
+	// need a running Herdr to be reported. The refusal comes first of all,
+	// so a card no agent may take costs no pane, no vb lock, no worktree
+	// and no run record.
 	column := d.Config.Column(req.Spec.Status)
-	role := d.resolveRole(req, column)
+	role, err := d.resolveRole(req, column)
+	if err != nil {
+		return nil, err
+	}
 	kind := d.resolveKind(req, column)
 	if !herdrcli.ValidKind(kind) {
 		return nil, fmt.Errorf("%w: %q is not a harness herdr can start (see `hvb harness list`)", ErrUnknownHarness, kind)
@@ -383,20 +388,40 @@ func (d *Dispatcher) releaseLock(ctx context.Context, featureID string) {
 	_ = d.VB.Release(ctx, featureID)
 }
 
-func (d *Dispatcher) resolveRole(req Request, column config.Column) roles.Role {
+// resolveRole picks the charter this dispatch runs under, or refuses the
+// dispatch outright when the card is not an agent's to take.
+//
+// The refusal is consulted before req.Role and column.Role, which is a
+// deliberate change of precedence and not an accident of ordering.
+// roles.Suggest already decided that `hitl` beats the card's own `role:`
+// label; a flag that outranked the refusal here would make the same card
+// dispatchable or not depending on which layer answered, and that incoherence
+// is worse than either rule alone. It is not hypothetical: config.Default
+// gives the review column role = "qa", so a gate placed after the
+// explicit-role branch would be bypassed by stock configuration for every
+// `hitl` card that reaches review. The owner who means it anyway drops the
+// label, which is the same act as saying the human half is done.
+//
+// roles.ErrNoCharter is not a refusal and keeps its fallback: a workspace with
+// no agents directory still dispatches under the configured role, which is
+// what roles.Load's doc promises.
+func (d *Dispatcher) resolveRole(req Request, column config.Column) (roles.Role, error) {
+	suggested, err := roles.Suggest(d.Roles, req.Spec, d.Config.Role)
+	if errors.Is(err, roles.ErrHumanOnly) {
+		return roles.Role{}, err
+	}
 	for _, want := range []string{req.Role, column.Role} {
 		if want == "" {
 			continue
 		}
 		if role, found := roles.Find(d.Roles, want); found {
-			return role
+			return role, nil
 		}
 	}
-	role, found := roles.Suggest(d.Roles, req.Spec, d.Config.Role)
-	if !found {
-		return roles.Role{Key: d.Config.Role, Name: d.Config.Role}
+	if err != nil {
+		return roles.Role{Key: d.Config.Role, Name: d.Config.Role}, nil
 	}
-	return role
+	return suggested, nil
 }
 
 func (d *Dispatcher) resolveKind(req Request, column config.Column) string {

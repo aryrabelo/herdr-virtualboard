@@ -485,7 +485,27 @@ func (m *Model) openDispatchPicker() {
 		m.setError(fmt.Errorf("no agent charters in .virtualboard/agents — cannot pick a role"))
 		return
 	}
-	suggested, _ := roles.Suggest(available, card.Spec, m.backend.Config().Role)
+	suggested, err := roles.Suggest(available, card.Spec, m.backend.Config().Role)
+	if err != nil {
+		// The refusal has to stop the picker, not merely fail to
+		// preselect a row. Measured live on the owner's board: pressing d
+		// on ceo-bora#160 (labels `project:bugtoprompt hitl`) opened this
+		// picker with `cartografo` preselected and `⏎ confirm` ready,
+		// because the refusal used to land in `_` and an unresolved
+		// suggestion left the index at 0, the first charter
+		// alphabetically.
+		//
+		// Any error refuses to open, and there is only one reachable
+		// here: len(available) is checked above, and with charters
+		// present Suggest always names a role unless it refuses. The
+		// error already names the card and the reason — which is the
+		// owner's own hands, not a missing charter, so it must not send
+		// the user to .virtualboard/agents — so the board shows it as
+		// roles wrote it and there is no second sentence to keep in step
+		// with the one dispatch prints.
+		m.setError(err)
+		return
+	}
 
 	options := make([]option, 0, len(available))
 	selected := 0

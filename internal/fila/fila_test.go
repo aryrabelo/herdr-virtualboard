@@ -2,8 +2,11 @@ package fila
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRunner answers one kit.py call with canned bytes and records how it was
@@ -203,5 +206,109 @@ func TestMisWiredCallErrorsButStillReturnsUsableMaps(t *testing.T) {
 			frontier.Priority[1] = Priority{Has: true}
 			frontier.Blocked[1] = true
 		})
+	}
+}
+
+// The deadline is the one behaviour in this package that no fixture can prove:
+// it needs a real child that outlives its context. This test binary is that
+// child. Re-execing it keeps the rule hermetic — nothing here runs python3,
+// kit.py, gh, or usina, and nothing depends on an external binary being on
+// PATH — while still going through the same exec.CommandContext the board uses.
+const (
+	helperEnv     = "FILA_TEST_CHILD"
+	helperSleeps  = "dorme"
+	helperRefuses = "recusa"
+	// helperRefusal stands in for kit.py's own refusal, the text that must
+	// survive to the board when the child fails on its own terms.
+	helperRefusal = "fronteira: nao consegui ler as issues de usina-fonte-unica"
+)
+
+func TestMain(m *testing.M) {
+	switch os.Getenv(helperEnv) {
+	case helperSleeps:
+		// Long enough that only the deadline can end it.
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	case helperRefuses:
+		fmt.Fprintln(os.Stderr, helperRefusal)
+		os.Exit(2)
+	}
+	os.Exit(m.Run())
+}
+
+// helperChild arms this binary to behave as mode when re-exec'd and returns the
+// path to run. The mode travels in the environment because ExecRunner passes no
+// environment of its own: the child inherits ours.
+func helperChild(t *testing.T, mode string) string {
+	t.Helper()
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatalf("nao achei o binario de teste para usar como filho: %v", err)
+	}
+	t.Setenv(helperEnv, mode)
+	return path
+}
+
+// TestDeadlineNamesTheDeadlineAndItsValue: a child killed by the context exits
+// -1 with empty stderr, so the board printed "python3 saiu -1: signal: killed"
+// (measured on the owner's real project). That names neither the deadline nor
+// its value, so nobody reading the board can tell what to change.
+func TestDeadlineNamesTheDeadlineAndItsValue(t *testing.T) {
+	child := helperChild(t, helperSleeps)
+	const prazo = 150 * time.Millisecond
+
+	stdout, err := execRunnerWithTimeout(prazo, child)
+	if err == nil {
+		t.Fatalf("filho que estourou o prazo voltou sem erro (stdout %q)", stdout)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "prazo") {
+		t.Fatalf("erro %q nao diz que foi prazo", msg)
+	}
+	if !strings.Contains(msg, prazo.String()) {
+		t.Fatalf("erro %q nao nomeia o valor do prazo (%s)", msg, prazo)
+	}
+	if strings.Contains(msg, "signal: killed") {
+		t.Fatalf("erro %q repassou \"signal: killed\": e o texto que nao explica nada a quem le o board", msg)
+	}
+}
+
+// TestChildThatFailsOnItsOwnKeepsItsDiagnosis: kit.py exiting 2 with its own
+// stderr is a different failure from a deadline kill, and the useful part is
+// the child's text plus its exit code. Answering that with deadline wording
+// would send the reader after the wrong defect.
+func TestChildThatFailsOnItsOwnKeepsItsDiagnosis(t *testing.T) {
+	child := helperChild(t, helperRefuses)
+
+	_, err := execRunnerWithTimeout(10*time.Second, child)
+	if err == nil {
+		t.Fatalf("filho que saiu 2 voltou sem erro")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, helperRefusal) {
+		t.Fatalf("erro %q perdeu o stderr do filho (%q)", msg, helperRefusal)
+	}
+	if !strings.Contains(msg, "saiu 2") {
+		t.Fatalf("erro %q nao carrega o exit code 2 do filho", msg)
+	}
+	if strings.Contains(msg, "prazo") {
+		t.Fatalf("erro %q culpou o prazo numa falha que o filho diagnosticou sozinho", msg)
+	}
+}
+
+// TestProductionDeadlineClearsTheMeasuredFrontierCost pins the const against
+// the measurement that condemned the old value: `kit.py fronteira
+// usina-fonte-unica` answered in 69s — measured with `time`, one isolated
+// successful call, the owner's real project with 33 open cards. The 60s
+// deadline that shipped before sat below that and killed every refresh, so
+// lowering this back under the measurement reintroduces the defect.
+func TestProductionDeadlineClearsTheMeasuredFrontierCost(t *testing.T) {
+	const medido = 69 * time.Second
+	if execTimeout <= medido {
+		t.Fatalf("execTimeout e %s, nao passa dos %s medidos em `kit.py fronteira usina-fonte-unica`: o board volta a matar a fronteira",
+			execTimeout, medido)
+	}
+	if execTimeout > 10*time.Minute {
+		t.Fatalf("execTimeout e %s: um board que pendura tanto antes de reportar diz menos que um que reporta", execTimeout)
 	}
 }

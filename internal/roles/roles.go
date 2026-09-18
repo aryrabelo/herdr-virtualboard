@@ -7,6 +7,7 @@
 package roles
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/fila"
 	"gopkg.in/yaml.v3"
 )
 
@@ -91,9 +93,22 @@ func Find(all []Role, want string) (Role, bool) {
 	return Role{}, false
 }
 
-// labelHints maps a feature label to the role key it suggests. The mapping
-// follows the "Role Selection Guidelines" table in `.virtualboard/agents/AGENTS.md`;
-// it is a default, and any per-project config or explicit `--role` overrides it.
+// labelHints maps a feature label to the role key it suggests. It is a default,
+// and any per-project config or explicit `--role` overrides it.
+//
+// Two vocabularies live here. The first ten rows follow the "Role Selection
+// Guidelines" table in `.virtualboard/agents/AGENTS.md`, the upstream
+// VirtualBoard workspace convention. The `rumo:*` rows are the owner's queue,
+// measured: of the 33 issues labelled `project:bugtoprompt` in
+// aryrabelo/ceo-bora, 16 carry `rumo:task`, 9 `rumo:grilling`, 2 `rumo:map`,
+// and not one carries any label from the upstream ten — so before these rows
+// every card on that board fell through to the fallback and got the same role.
+//
+// `folha` (26 cards) is deliberately absent. The three `rumo:*` labels already
+// cover 27 cards, so its overlap with them is unknown, and the hint scan takes
+// the first matching label in GitHub's own label order: a `folha` row could
+// beat `rumo:grilling` and send an implementer at a card whose whole point is
+// that it must not be implemented yet.
 var labelHints = []struct {
 	labels []string
 	role   string
@@ -108,23 +123,81 @@ var labelHints = []struct {
 	{[]string{"architecture", "adr", "tech-debt", "standards"}, "architect"},
 	{[]string{"qa", "test", "testing", "regression", "e2e"}, "qa"},
 	{[]string{"planning", "coordination", "sprint", "roadmap"}, "pm"},
+
+	// The owner's `rumo:*` vocabulary. The colon survives normalize (which
+	// only lowercases, trims, and folds `-` to `_`), and both the label and
+	// the candidate go through it, so these match the label as GitHub
+	// spells it — no second spelling to keep in sync. `rumo:grilling` is
+	// already spelled once in fila, which routes it to the Review column,
+	// and reads from there.
+	{[]string{"rumo:task"}, "executor"},
+	{[]string{fila.LabelGrilling}, "grilling"},
+	{[]string{"rumo:map"}, "cartografo"},
 }
+
+// ErrHumanOnly reports a card no agent may be dispatched onto at all: the work
+// is the owner's own hands, and no charter can finish it.
+//
+// It is why Suggest answers with an error instead of a second bool. That bool
+// carried two facts at once — "no charter matched", where falling back to the
+// configured default role is the right answer, and "do not dispatch this at
+// all", where the same fallback launches an agent at a card it cannot finish.
+// No caller could tell them apart, so both callers dropped it into `_`, and the
+// refusal was inert: measured live on the owner's board, pressing d on
+// ceo-bora#160 (labels `project:bugtoprompt hitl`) opened the role picker with
+// `cartografo` preselected and `⏎ confirm` ready to launch. An error separates
+// the two facts, and `role, _ := Suggest(...)` is a discard a reader and a
+// linter both see, where a dropped bool was invisible to both.
+var ErrHumanOnly = errors.New("only the owner can close this card")
+
+// ErrNoCharter reports that no charter matched. It is not a refusal: the caller
+// may dispatch under its own configured default role, which is what a workspace
+// with no agents directory has always done.
+var ErrNoCharter = errors.New("no charter matched")
 
 // Suggest picks the role that best fits a feature, given the roles the
 // workspace actually ships.
 //
-// Precedence: an explicit `role:` label wins, then the first label that matches
-// a hint, then the status default (review is QA's), then fallback. The result's
-// second value is false when no role could be resolved at all.
-func Suggest(all []Role, spec *feature.Spec, fallback string) (Role, bool) {
+// Precedence: a `hitl` label refuses outright, then an explicit `role:` label
+// wins, then the first label that matches a hint, then the status default
+// (review is QA's), then fallback.
+//
+// The error tells the two failures apart and they are not interchangeable:
+// ErrHumanOnly forbids the dispatch, ErrNoCharter merely leaves the role to the
+// caller's default. Callers branch on them with errors.Is; treating them alike
+// is the defect this signature exists to make hard.
+func Suggest(all []Role, spec *feature.Spec, fallback string) (Role, error) {
+	// `fila.LabelHITL` is the one label that means "only the owner's own
+	// hands close this": mint a credential, approve, click a dashboard,
+	// plug in hardware. fila already routes it to Blocked ahead of an
+	// assignee, and here it refuses dispatch outright — same label, same
+	// invariant, so it reads from the same const.
+	//
+	// It beats the hints and the `role:` label both: all three are card
+	// content of equal authority, and no charter fits a card an agent
+	// cannot finish. 6 of the 33 cards on the owner's queue carry it, and
+	// each dispatch there would spend tokens to learn that.
+	//
+	// The refusal is decided before the charter set is even looked at,
+	// because it is a property of the card and not of what the workspace
+	// ships: otherwise a workspace with no charters would answer
+	// ErrNoCharter for a `hitl` card, and ErrNoCharter is the answer that
+	// dispatches under the default role.
+	if spec != nil {
+		for _, label := range spec.Labels {
+			if normalize(label) == normalize(fila.LabelHITL) {
+				return Role{}, fmt.Errorf("%w: %s is labelled %s — that is the owner's own hands (mint a credential, approve, click a dashboard), so no charter fits it", ErrHumanOnly, spec.ID, fila.LabelHITL)
+			}
+		}
+	}
 	if len(all) == 0 {
-		return Role{}, false
+		return Role{}, fmt.Errorf("%w: this workspace ships no agent charters", ErrNoCharter)
 	}
 	if spec != nil {
 		for _, label := range spec.Labels {
 			if rest, ok := strings.CutPrefix(label, "role:"); ok {
 				if role, found := Find(all, rest); found {
-					return role, true
+					return role, nil
 				}
 			}
 		}
@@ -135,7 +208,7 @@ func Suggest(all []Role, spec *feature.Spec, fallback string) (Role, bool) {
 						continue
 					}
 					if role, found := Find(all, hint.role); found {
-						return role, true
+						return role, nil
 					}
 				}
 			}
@@ -144,19 +217,19 @@ func Suggest(all []Role, spec *feature.Spec, fallback string) (Role, bool) {
 		// labels say about the work that produced it.
 		if spec.Status == feature.Review {
 			if role, found := Find(all, "qa"); found {
-				return role, true
+				return role, nil
 			}
 		}
 	}
 	if fallback != "" {
 		if role, found := Find(all, fallback); found {
-			return role, true
+			return role, nil
 		}
 	}
 	if role, found := Find(all, "fullstack_dev"); found {
-		return role, true
+		return role, nil
 	}
-	return all[0], true
+	return all[0], nil
 }
 
 type frontmatter struct {

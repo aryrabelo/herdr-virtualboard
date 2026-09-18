@@ -14,6 +14,8 @@ package issuesrc
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
 	"github.com/virtualboard/herdr-virtualboard/internal/fila"
 	"github.com/virtualboard/herdr-virtualboard/internal/usinasrc"
+	"gopkg.in/yaml.v3"
 )
 
 // LabelPrefix is the reserved namespace, spelled here for the same reason the
@@ -63,28 +66,41 @@ const (
 // whole source with one fixture reader and never executes anything.
 type Runner func(name string, args ...string) ([]byte, error)
 
-// Source reads label's issues of ceoRepo and, when kitPath, slug and
-// frontierRepo are given, ranks them with kit.py's frontier.
+// Source reads label's issues of ceoRepo and, when kitPath and slug are
+// given, ranks them with kit.py's frontier.
 type Source struct {
 	run     Runner
 	ceoRepo string
 	label   string
 	kitPath string
 	slug    string
-	// frontierRepo is the repository kit.py's issue NUMBERS belong to, and
-	// it exists because they are not necessarily the queue's.
+	// frontierRepo is the human's declaration of the repository kit.py's
+	// issue NUMBERS belong to. It is optional, and it is only ever a
+	// cross-check: the repository is DERIVED from the project charter, and
+	// a declaration the charter contradicts refuses the join instead of
+	// winning it.
 	//
-	// Measured 2026-09-17: `kit.py fronteira bugtoprompt` ranks issue 31,
-	// which is aryrabelo/bugtoprompt#31 ("CI red: deploy on main"), an
-	// execution-repository issue — while aryrabelo/ceo-bora#31 is a closed,
-	// unrelated issue about channel identity. kit.py's own answer names
-	// neither repository (its keys are verbo, slug, pronto, bloqueado), so
-	// joining on a bare number would have ranked, or BLOCKED, whichever
-	// card happened to share the integer. In that measurement the wrong
-	// card was closed, so the defect was invisible: `closed` wins the
-	// column before any frontier, and the board looked right by luck.
+	// The repository matters because kit.py's numbers are not necessarily
+	// the queue's. Measured 2026-09-17: `kit.py fronteira bugtoprompt`
+	// ranks issue 31, which is aryrabelo/bugtoprompt#31 ("CI red: deploy on
+	// main"), an execution-repository issue — while aryrabelo/ceo-bora#31
+	// is a closed, unrelated issue about channel identity. kit.py's own
+	// answer names neither repository (its keys are verbo, slug, pronto,
+	// bloqueado), so joining on a bare number would have ranked, or
+	// BLOCKED, whichever card happened to share the integer. In that
+	// measurement the wrong card was closed, so the defect was invisible:
+	// `closed` wins the column before any frontier, and the board looked
+	// right by luck.
+	//
+	// It used to be required, which made the board's correctness depend on
+	// a flag a human types — and a human who types the wrong owner/name
+	// gets a board that only says it did not join. The charter cannot be
+	// mistyped here, because it is the same file kit.py itself reads.
 	frontierRepo string
 	limit        int
+	// notes are problems the caller measured while wiring this source,
+	// before any binary was asked anything. See Note.
+	notes []error
 }
 
 // DefaultLimit is how many issues one read asks for. The owner's largest live
@@ -96,9 +112,18 @@ const DefaultLimit = 200
 // New builds the source. run is injected so the board is testable without
 // usina, gh or python3 on PATH.
 //
-// kitPath, slug and frontierRepo are optional as a set: without them the board
-// still draws every card, only unranked, which is a narrower board rather than
-// a wrong one.
+// kitPath and slug are optional as a pair: without them the board still draws
+// every card, only unranked, which is a narrower board rather than a wrong
+// one. With them the repository whose issue numbers kit.py ranks is derived
+// from the project charter — measured 2026-09-17, `kit.py fronteira <slug>`
+// resolves that repository by reading <CEORoot>/projetos/<slug>/charter.md and
+// taking the `repo:` front-matter field (projetos/bugtoprompt/charter.md says
+// `repo: aryrabelo/bugtoprompt`), so the charter is not a second source of
+// truth but the same one.
+//
+// frontierRepo is therefore an optional override, kept only so a caller can
+// assert what it believes: agreeing with the charter changes nothing, and
+// disagreeing with it refuses the join and names both values.
 func New(run Runner, ceoRepo, label, kitPath, slug, frontierRepo string, limit int) *Source {
 	if limit <= 0 {
 		limit = DefaultLimit
@@ -114,13 +139,33 @@ func New(run Runner, ceoRepo, label, kitPath, slug, frontierRepo string, limit i
 	}
 }
 
+// Note attaches a problem the caller measured while wiring this source, so it
+// reaches the board through the one problem list the board already draws.
+//
+// The problems worth attaching are the ones no subprocess can discover for the
+// board. WorkDir's refusal is the measured example: it is a property of a
+// path, known before usina is asked anything, and it is the reason the very
+// next line of Load will say "issue queue served by gh". A second, card-less
+// source would report the same sentence in a second place; one queue keeps one
+// problem list.
+//
+// A nil problem attaches nothing, so a caller never has to branch.
+func (s *Source) Note(problem error) *Source {
+	if s == nil || problem == nil {
+		return s
+	}
+	s.notes = append(s.notes, problem)
+	return s
+}
+
 // Load reads the queue and returns one card per issue.
 //
 // Every degradation is returned as an error alongside the cards, never
 // swallowed: the board shows the problems it was told about, and a card read
 // through gh because usina was silent is still a card. A hard failure — both
 // binaries dead, or a mis-wired call — returns no cards and says which
-// binaries it asked.
+// binaries it asked. Anything the caller measured while wiring the source (see
+// Note) is reported first, because it explains what follows it.
 func (s *Source) Load(ctx context.Context) ([]*feature.Spec, []error) {
 	if s == nil || s.run == nil {
 		return nil, []error{fmt.Errorf("issuesrc: no runner, so no queue can be read")}
@@ -129,12 +174,17 @@ func (s *Source) Load(ctx context.Context) ([]*feature.Spec, []error) {
 		return nil, []error{err}
 	}
 
+	// The notes were measured before anything ran and they explain the
+	// degradations below them, so they come first — including when there
+	// is nothing below them: a queue neither binary could answer is
+	// exactly the case a note about the working directory explains.
+	errs := append([]error(nil), s.notes...)
+
 	queue, err := usinasrc.Load(usinasrc.Runner(s.run), s.ceoRepo, s.label, s.limit)
 	if err != nil {
-		return nil, []error{err}
+		return nil, append(errs, err)
 	}
 
-	var errs []error
 	if queue.Origin.Reason != "" {
 		errs = append(errs, fmt.Errorf("issue queue served by %s: %s",
 			originName(queue.Origin.Source), queue.Origin.Reason))
@@ -150,15 +200,11 @@ func (s *Source) Load(ctx context.Context) ([]*feature.Spec, []error) {
 	switch {
 	case s.kitPath == "" || s.slug == "":
 		// No frontier asked for: an unranked board, and nothing to say.
-	case s.frontierRepo == "":
-		errs = append(errs, fmt.Errorf(
-			"frontier not joined, cards are unranked: nothing named the repository kit.py's issue numbers belong to, and joining them onto %s by number alone would rank or block whichever card shares the integer",
-			queue.Repo))
-	case !strings.EqualFold(s.frontierRepo, queue.Repo):
-		errs = append(errs, fmt.Errorf(
-			"frontier not joined, cards are unranked: kit.py ranks %s and this queue is %s, so their issue numbers name different issues",
-			s.frontierRepo, queue.Repo))
 	default:
+		if refusal := s.frontierRefusal(queue.Repo); refusal != nil {
+			errs = append(errs, refusal)
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, []error{err}
 		}
@@ -181,6 +227,192 @@ func (s *Source) Load(ctx context.Context) ([]*feature.Spec, []error) {
 	}
 	sortSpecs(specs, frontier)
 	return specs, errs
+}
+
+// frontierRefusal answers whether kit.py's frontier may be joined onto
+// queueRepo's cards, and returns the refusal to report when it may not.
+//
+// Nil means join. Every other answer is a sentence naming the values that
+// disagree and the file that settled it, because the alternative — joining on
+// a bare integer — silently moves whichever card shares the number.
+func (s *Source) frontierRefusal(queueRepo string) error {
+	charter := charterPath(s.kitPath, s.slug)
+	ranked, err := charterRepo(charter)
+	switch {
+	case err != nil:
+		// Absence is absence: no fallback to the CEO repository. kit.py
+		// reads this same file to decide which repository's issues to
+		// rank, so a charter that does not name one is a frontier nobody
+		// can place, and the path is the only actionable part.
+		return fmt.Errorf(
+			"frontier not joined, cards are unranked: %s does not name the repository kit.py's issue numbers belong to (%v), and joining them onto %s by number alone would rank or block whichever card shares the integer",
+			charter, err, queueRepo)
+	case s.frontierRepo != "" && !strings.EqualFold(s.frontierRepo, ranked):
+		// A declaration the charter contradicts is a wrong declaration,
+		// and it has to read as one: the human typed an owner/name, the
+		// file kit.py itself reads says another, and ranking by number
+		// while that is unresolved would move real cards.
+		return fmt.Errorf(
+			"frontier not joined, cards are unranked: --kit-repo says %s but %s says kit.py ranks %s, so one of the two is wrong",
+			s.frontierRepo, charter, ranked)
+	case !strings.EqualFold(ranked, queueRepo):
+		return fmt.Errorf(
+			"frontier not joined, cards are unranked: kit.py ranks %s and this queue is %s, so their issue numbers name different issues",
+			ranked, queueRepo)
+	}
+	return nil
+}
+
+// CEORoot is the CEO repository kitPath lives in.
+//
+// kit.py lives in bin/kit.py, so the repository is its grandparent. Two
+// callers need that directory — the command, to run the children inside it
+// (see DirRunner), and this package, to find the project charter — so the
+// layout fact is spelled once here instead of drifting in two places.
+//
+// An empty kitPath yields an empty root rather than ".", which DirRunner reads
+// as "the current directory": there is nothing to derive from, and an invented
+// directory would send the children somewhere.
+func CEORoot(kitPath string) string {
+	kitPath = strings.TrimSpace(kitPath)
+	if kitPath == "" {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(kitPath))
+}
+
+// WorkDir resolves the directory the queue's children must run in, and the
+// problem that directory already proves.
+//
+// Two independent facts used to travel in one flag. Asking for the frontier
+// means naming kit.py, and kit.py's path happened to be the only thing a
+// caller could derive the working directory from (CEORoot) — so a board that
+// did not want the ranking got no usina either. Measured 2026-09-17 from
+// ~/Sites/bora-team/bugtoprompt, with the CEO repository nowhere in the path,
+// usina exits 2 with:
+//
+//	instância da usina indeterminada: nenhum segmento 'ceo-<nome>' no cwd
+//	(<cwd>) — rode de dentro do checkout (ou worktree) de um CEO, ou aponte
+//	USINA_CONFIG pro yml da instância; a usina nunca adivinha de qual time
+//	é a rota
+//
+// and the whole queue was read by gh instead: reported rather than silent, but
+// the worse source for a reason nobody asked for. So where the CEO repository
+// is, is asked for on its own, and it wins.
+//
+// Precedence: ceoDir; then CEORoot(kitPath), so a caller that passes only the
+// frontier flags keeps the directory it always got; then "", the process's own
+// directory, which DirRunner reads as "here" and which is the right answer for
+// a board launched from inside the CEO checkout. Nothing is invented.
+//
+// The problem costs no subprocess because it is a property of the path:
+// usina resolves WHICH team's route it is answering from a ceo-<name> segment
+// of the working directory, or from USINA_CONFIG. It is returned rather than
+// raised because a queue board is more than usina — the gh fallback still
+// answers, and a --repo board next to it never needed usina at all — so
+// refusing to open would kill a board that works in part.
+func WorkDir(ceoDir, kitPath string) (string, error) {
+	dir := strings.TrimSpace(ceoDir)
+	if dir == "" {
+		dir = CEORoot(kitPath)
+	}
+	return dir, instanceProblem(dir)
+}
+
+// ceoSegmentPrefix is how usina names an instance: a path segment `ceo-<name>`
+// (ceo-bora, ceo-pp), which a worktree of that checkout keeps as a prefix.
+const ceoSegmentPrefix = "ceo-"
+
+// instanceProblem is usina's refusal, predicted from the path alone.
+//
+// An empty dir is the process's own directory, because that is what DirRunner
+// runs the children in, and it is the directory usina would read. A Getwd that
+// fails names nothing, and a sentence that names no directory is noise, so it
+// says nothing at all.
+func instanceProblem(dir string) error {
+	// USINA_CONFIG points at the instance yml outright, so the path stops
+	// being evidence: usina answers from a directory with no ceo- segment
+	// whenever it is set, and a board that complained anyway would be
+	// teaching the owner to ignore the problem line.
+	if strings.TrimSpace(os.Getenv("USINA_CONFIG")) != "" {
+		return nil
+	}
+	named := dir
+	if named == "" {
+		here, err := os.Getwd()
+		if err != nil {
+			return nil
+		}
+		named = here
+	}
+	if hasCEOSegment(named) {
+		return nil
+	}
+	return fmt.Errorf("the queue's children run in %s, which has no ceo-<name> path segment: "+
+		"usina refuses to route from there (\"instância da usina indeterminada: nenhum segmento "+
+		"'ceo-<nome>' no cwd\"), so the issues are read by gh and left unranked — say where the "+
+		"CEO repository is, or export USINA_CONFIG with the instance yml", named)
+}
+
+// hasCEOSegment answers whether any segment of dir names a CEO instance.
+//
+// Segments are compared, never the whole string: a path that merely CONTAINS
+// "ceo-" (a file named report-ceo-notes.md, a directory called traceo-tmp)
+// says nothing about which instance usina would resolve, and a board that
+// stayed quiet for one of those would be quiet for the wrong reason.
+func hasCEOSegment(dir string) bool {
+	for _, segment := range strings.Split(filepath.ToSlash(dir), "/") {
+		if name, found := strings.CutPrefix(segment, ceoSegmentPrefix); found && name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// charterPath is the project charter kit.py resolves the ranked repository
+// from: <CEORoot>/projetos/<slug>/charter.md, measured 2026-09-17 in kit.py's
+// own `fronteira` verb.
+func charterPath(kitPath, slug string) string {
+	root := CEORoot(kitPath)
+	if root == "" || strings.TrimSpace(slug) == "" {
+		return ""
+	}
+	return filepath.Join(root, "projetos", strings.TrimSpace(slug), "charter.md")
+}
+
+// charterRepo reads the `repo:` front-matter field of a project charter.
+//
+// The front matter is parsed, never pattern-matched: `repo:` also appears in
+// charter prose, and a regexp over the whole file would take dictation from
+// whichever line came first.
+func charterRepo(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("no charter path to read")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !strings.HasPrefix(text, "---\n") {
+		return "", fmt.Errorf("no front matter")
+	}
+	rest := text[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "", fmt.Errorf("unterminated front matter")
+	}
+	var header struct {
+		Repo string `yaml:"repo"`
+	}
+	if err := yaml.Unmarshal([]byte(rest[:end+1]), &header); err != nil {
+		return "", err
+	}
+	repo := strings.TrimSpace(header.Repo)
+	if repo == "" {
+		return "", fmt.Errorf("no repo: field in its front matter")
+	}
+	return repo, nil
 }
 
 // spec converts one issue to a card.
@@ -325,7 +557,10 @@ func ExecRunner(name string, args ...string) ([]byte, error) {
 // ranking at all, with two declared degradations explaining why: correct
 // behaviour, and a uselessly narrow board.
 //
-// An empty dir is the current directory, so this is always safe to wrap.
+// An empty dir is the current directory, so this is always safe to wrap. Which
+// dir to wrap is WorkDir's answer, not this function's: a caller that derived
+// it from kit.py's path alone was letting the frontier flags decide whether
+// usina answered at all.
 func DirRunner(dir string) Runner {
 	if strings.TrimSpace(dir) == "" {
 		return ExecRunner

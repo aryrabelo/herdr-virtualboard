@@ -153,7 +153,15 @@ func LoadFrontier(run Runner, kitPath, slug string) (Frontier, error) {
 // child process's problem: nothing secret passes through here, and a nil Stdin
 // guarantees kit.py cannot block this call waiting for input it will never get.
 func ExecRunner(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	return execRunnerWithTimeout(execTimeout, name, args...)
+}
+
+// execRunnerWithTimeout is ExecRunner with the deadline as an argument. The
+// deadline is the one behaviour here that cannot be proven with a fixture, and
+// no test may wait out the production value, so production passes execTimeout
+// and tests pass milliseconds. Nothing else varies.
+func execRunnerWithTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	path, err := exec.LookPath(name)
@@ -168,7 +176,7 @@ func ExecRunner(name string, args ...string) ([]byte, error) {
 	cmd.Stdin = nil
 
 	if err := cmd.Run(); err != nil {
-		return nil, runError(name, err, stderr.Bytes())
+		return nil, runError(name, timeout, ctx.Err(), err, stderr.Bytes())
 	}
 	return stdout.Bytes(), nil
 }
@@ -176,7 +184,18 @@ func ExecRunner(name string, args ...string) ([]byte, error) {
 // runError keeps the child's own diagnosis. kit.py prints its refusal to
 // stderr ("fronteira: nao consegui ler as issues de …") and exits 1; that text
 // is the useful part, the exit status alone is not.
-func runError(name string, runErr error, stderr []byte) error {
+//
+// The deadline is the one failure where the child has no diagnosis to keep:
+// the context kills it, so stderr is empty and ExitCode() is -1, and passing
+// that through is what put "python3 saiu -1: signal: killed" on the board
+// (measured) — a message naming neither the deadline nor its value. ctxErr is
+// the only witness that the kill was ours, so it is read before the child's
+// text; a child that exited on its own keeps its stderr and its exit code.
+func runError(name string, timeout time.Duration, ctxErr, runErr error, stderr []byte) error {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("%s passou do prazo de %s e foi interrompido antes de responder", name, timeout)
+	}
+
 	reason := strings.TrimSpace(string(stderr))
 	if reason == "" {
 		reason = runErr.Error()
@@ -193,10 +212,15 @@ func runError(name string, runErr error, stderr []byte) error {
 }
 
 const (
-	// execTimeout bounds one kit.py call. `fronteira` makes one gh request
-	// per open issue, so it is seconds slow by design; a board refresh that
-	// hangs past this is a failure worth reporting.
-	execTimeout = 60 * time.Second
+	// execTimeout bounds one kit.py call. `fronteira` makes one gh request per
+	// open issue, so its cost grows with the project: it answered in 69s on
+	// the owner's real project (measured with `time`, one isolated successful
+	// call, 33 open cards), and the previous 60s deadline sat below that and
+	// killed it on every refresh. 3 minutes is ~2.6x the measurement, which
+	// absorbs a project a couple of times larger or a slow gh round trip.
+	// Still bounded on purpose: a board that hangs forever tells the owner
+	// less than one that reports which deadline it blew.
+	execTimeout = 3 * time.Minute
 	// maxStderrBytes caps how much of the child's stderr reaches the board.
 	maxStderrBytes = 512
 )

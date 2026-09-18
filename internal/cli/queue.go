@@ -53,6 +53,7 @@ func newQueueCommand(app *App) *cobra.Command {
 		issues       string
 		label        string
 		kitPath      string
+		ceoRoot      string
 		project      string
 		frontierRepo string
 		charters     string
@@ -77,6 +78,26 @@ each card carrying the issue it closes.
 it, kit.py's frontier says what is ready and what is blocked, and gh answers
 when usina cannot. Whichever source answered is named on every card and every
 degradation is reported on the board instead of being silently absorbed.
+
+The frontier is opt-in as a pair: --kit with the path to kit.py and --project
+with the slug it ranks. Which repository its issue numbers belong to is read
+from that project's charter, <ceo-repo>/projetos/<slug>/charter.md — the same
+file kit.py itself reads — so nothing is declared twice. --kit-repo only
+asserts that derivation, and a value the charter contradicts refuses the join
+and names both.
+
+Wanting the ranking and saying where the CEO repository is are two different
+things, so they are two different flags. usina and kit.py both resolve WHICH
+team's queue they are answering from the directory they run in — usina exits
+with "instância da usina indeterminada: nenhum segmento 'ceo-<nome>' no cwd"
+from anywhere else — and --ceo-root is how that directory is named. Without it
+the directory is derived from --kit, as it always was, and without either one
+the board reads from where it was launched, which is right when that is the
+CEO checkout. Measured 2026-09-17: a board opened from an execution repository
+without --kit had its whole issue queue read by gh, unranked, for a reason the
+user never asked about. A resolved directory with no ceo-<name> segment is now
+reported on the board before anything is run, and the board still opens: the
+gh fallback answers, and --repo never needed usina at all.
 
 Every source is read-only. Moving, editing or creating a card is refused with
 the place that owns it, because FIOS.md, gates/ and the issue queue each have
@@ -153,15 +174,23 @@ that directory exists.`,
 				if strings.Count(issues, "/") != 1 {
 					return Usage("--issues %s is not in owner/name form", issues)
 				}
-				// The frontier is optional as a set: kit.py ranks one
-				// project at a time, so asking for it needs the script,
-				// the project slug, AND the repository its issue numbers
-				// belong to. That last one is not bureaucracy — measured
-				// 2026-09-17, `kit.py fronteira bugtoprompt` ranks
-				// aryrabelo/bugtoprompt#31 while aryrabelo/ceo-bora#31 is
-				// an unrelated closed issue, and kit.py's answer names no
-				// repository at all. Without it the join would rank, or
-				// block, whichever card shares the integer.
+				// The frontier is optional as a pair: kit.py ranks
+				// one project at a time, so asking for it needs the
+				// script and the project slug. WHICH repository its
+				// numbers belong to is not asked for — measured
+				// 2026-09-17, kit.py resolves it by reading
+				// <ceo-repo>/projetos/<slug>/charter.md and taking
+				// the `repo:` front-matter field, and issuesrc reads
+				// the same file. That matters because the numbers are
+				// not the queue's: `kit.py fronteira bugtoprompt`
+				// ranks aryrabelo/bugtoprompt#31 while
+				// aryrabelo/ceo-bora#31 is an unrelated closed issue,
+				// and kit.py's answer names no repository at all.
+				//
+				// --kit-repo survives only as an assertion of that
+				// derivation. It is not required, because a required
+				// flag a human can type wrong buys a board that
+				// merely reports it did not join.
 				kit, slug := strings.TrimSpace(kitPath), strings.TrimSpace(project)
 				kitRepo := strings.TrimSpace(frontierRepo)
 				asked := kit != "" || slug != "" || kitRepo != ""
@@ -170,24 +199,42 @@ that directory exists.`,
 					return Usage("the frontier needs --kit with the path to kit.py")
 				case asked && slug == "":
 					return Usage("the frontier needs --project with the slug kit.py ranks")
-				case asked && kitRepo == "":
-					return Usage("the frontier needs --kit-repo with the owner/name whose issue numbers kit.py ranks (kit.py does not say)")
 				case kitRepo != "" && strings.Count(kitRepo, "/") != 1:
 					return Usage("--kit-repo %s is not in owner/name form", kitRepo)
+				}
+				// Where the CEO repository is, is its own flag:
+				// asking for the ranking and saying which team's
+				// queue this is are two facts, and tying them to
+				// --kit meant a board that wanted no ranking got no
+				// usina either (see issuesrc.WorkDir). A directory
+				// that is not there would send every child somewhere
+				// it cannot run, so it is named and refused here
+				// rather than rediscovered on every refresh.
+				ceoDir := strings.TrimSpace(ceoRoot)
+				if ceoDir != "" {
+					resolved, err := filepath.Abs(ceoDir)
+					if err != nil {
+						return err
+					}
+					if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+						return Usage("--ceo-root %s is not a directory holding the CEO repository", ceoRoot)
+					}
+					ceoDir = resolved
 				}
 				// usina and kit.py both resolve WHICH queue they are
 				// talking about from the working directory, so the
 				// children run in the CEO repository rather than in
-				// whatever worktree the board was launched from. The
-				// repository is kit.py's own grandparent (bin/kit.py);
-				// without --kit there is nothing to derive it from and
-				// the caller has to already be there.
-				from := ""
-				if kit != "" {
-					from = filepath.Dir(filepath.Dir(kit))
-				}
+				// whatever worktree the board was launched from.
+				// issuesrc.WorkDir decides that directory — the
+				// declared one, else kit.py's own grandparent, else
+				// here — and hands back the refusal the path alone
+				// already proves, which is reported on the board
+				// instead of being discovered from usina's exit code
+				// one subprocess later.
+				from, instance := issuesrc.WorkDir(ceoDir, kit)
 				sources = append(sources, issuesrc.New(
-					issuesrc.DirRunner(from), issues, label, kit, slug, kitRepo, limit))
+					issuesrc.DirRunner(from), issues, label, kit, slug, kitRepo, limit,
+				).Note(instance))
 				names = append(names, issues+" issues")
 			}
 
@@ -226,8 +273,9 @@ that directory exists.`,
 	cmd.Flags().StringVar(&repo, "repo", os.Getenv("HVB_QUEUE_REPO"), "GitHub repository as owner/name, read through gh (default: $HVB_QUEUE_REPO)")
 	cmd.Flags().StringVar(&issues, "issues", os.Getenv("HVB_QUEUE_ISSUES"), "CEO repository as owner/name whose issue queue to read through usina (default: $HVB_QUEUE_ISSUES)")
 	cmd.Flags().StringVar(&label, "label", os.Getenv("HVB_QUEUE_LABEL"), "only issues carrying this label, e.g. project:bugtoprompt (default: $HVB_QUEUE_LABEL)")
+	cmd.Flags().StringVar(&ceoRoot, "ceo-root", os.Getenv("HVB_QUEUE_CEO_ROOT"), "directory the queue's children run in: the CEO repository checkout, or a worktree of it, whose ceo-<name> segment tells usina which team's route it is answering; without it derived from --kit, without either the current directory (default: $HVB_QUEUE_CEO_ROOT)")
 	cmd.Flags().StringVar(&kitPath, "kit", os.Getenv("HVB_QUEUE_KIT"), "path to kit.py, whose frontier ranks the issues (default: $HVB_QUEUE_KIT)")
-	cmd.Flags().StringVar(&frontierRepo, "kit-repo", os.Getenv("HVB_QUEUE_KIT_REPO"), "owner/name whose issue numbers kit.py's frontier ranks; required with --kit because kit.py does not say (default: $HVB_QUEUE_KIT_REPO)")
+	cmd.Flags().StringVar(&frontierRepo, "kit-repo", os.Getenv("HVB_QUEUE_KIT_REPO"), "owner/name whose issue numbers kit.py's frontier ranks; optional, derived from <ceo-repo>/projetos/<project>/charter.md, and a value that charter contradicts refuses the join (default: $HVB_QUEUE_KIT_REPO)")
 	cmd.Flags().StringVar(&project, "project", os.Getenv("HVB_QUEUE_PROJECT"), "project slug kit.py ranks, e.g. bugtoprompt (default: $HVB_QUEUE_PROJECT)")
 	cmd.Flags().StringVar(&charters, "charters", os.Getenv("HVB_QUEUE_CHARTERS"), "directory holding the agent role charters, e.g. <vault>/.virtualboard/agents; requires --work-root (default: $HVB_QUEUE_CHARTERS)")
 	cmd.Flags().StringVar(&workRoot, "work-root", os.Getenv("HVB_QUEUE_WORK_ROOT"), "repository a dispatched agent works in; requires --charters (default: $HVB_QUEUE_WORK_ROOT)")

@@ -1,29 +1,39 @@
 package usinasrc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Fixtures are the bytes the binaries actually printed, escapes included:
-// routeWithRefusal is `usina rota show --repo aryrabelo/ceo-bora` verbatim
-// (measured 2026-09-17), and usinaListBody is two elements of
+// routeKBRefused is `usina rota show --repo aryrabelo/ceo-bora` verbatim
+// (measured 2026-09-17 — `kb` is absent from that CEO's usina-config, so every
+// route of it carries that refusal), and usinaListBody is two elements of
 // `usina issue list --repo aryrabelo/ceo-bora --label project:bugtoprompt`.
 const (
 	routeClean = `{"repo": "aryrabelo/ceo-bora", "mapa": "aryrabelo/ceo-bora", ` +
 		`"spec": "aryrabelo/ceo-bora", "issues": "aryrabelo/ceo-bora", "config": "ceo-bora.yml"}`
 
-	routeWithRefusal = `{"repo": "aryrabelo/ceo-bora", "mapa": "aryrabelo/ceo-bora", ` +
+	routeKBRefused = `{"repo": "aryrabelo/ceo-bora", "mapa": "aryrabelo/ceo-bora", ` +
 		`"spec": "aryrabelo/ceo-bora", "issues": "aryrabelo/ceo-bora", ` +
 		`"kb": {"recusa": "'kb' ausente ou n\u00e3o-mapping em usina-config (ceo-bora.yml): ` +
 		`None \u2014 declare kb: {repo: <owner/repo>, modo: proposta|direto}"}, "config": "ceo-bora.yml"}`
 
-	// refusalPhrase is routeWithRefusal's phrase as the owner reads it, so the
-	// test also proves the escapes are decoded rather than carried raw.
-	refusalPhrase = "'kb' ausente ou não-mapping em usina-config (ceo-bora.yml): " +
-		"None — declare kb: {repo: <owner/repo>, modo: proposta|direto}"
+	// routeIssuesRefused is the same answer shape with the refusal in the one
+	// area the board reads, which is the only phrase RouteRefusal carries.
+	routeIssuesRefused = `{"repo": "aryrabelo/ceo-bora", "mapa": "aryrabelo/ceo-bora", ` +
+		`"spec": "aryrabelo/ceo-bora", ` +
+		`"issues": {"recusa": "'issues' ausente ou n\u00e3o-mapping em usina-config (ceo-bora.yml): ` +
+		`None \u2014 declare issues: {repo: <owner/repo>}"}, "config": "ceo-bora.yml"}`
+
+	// issuesRefusalPhrase is routeIssuesRefused's phrase as the owner reads it,
+	// so the test also proves the escapes are decoded rather than carried raw.
+	issuesRefusalPhrase = "'issues' ausente ou não-mapping em usina-config (ceo-bora.yml): " +
+		"None — declare issues: {repo: <owner/repo>}"
 
 	routeIssuesElsewhere = `{"repo": "aryrabelo/ceo-bora", "mapa": "aryrabelo/ceo-bora", ` +
 		`"issues": "aryrabelo/fila-de-verdade", "config": "ceo-bora.yml"}`
@@ -175,9 +185,13 @@ func TestLoadFromUsinaLeavesReasonEmpty(t *testing.T) {
 	}
 }
 
-func TestLoadCarriesRouteRefusalAndStillLists(t *testing.T) {
+// A sibling area's refusal is not about the queue, and reporting it lights a
+// permanent false problem on the board: `kb` is absent from ceo-bora's
+// usina-config (measured 2026-09-17), so every single route of that CEO
+// refuses `kb` — an area the kanban does not even read.
+func TestLoadIgnoresSiblingAreaRefusalAndStillLists(t *testing.T) {
 	run := newFake(map[string]answer{
-		"usina rota show":  {stdout: routeWithRefusal},
+		"usina rota show":  {stdout: routeKBRefused},
 		"usina issue list": {stdout: usinaListBody},
 	})
 
@@ -185,14 +199,46 @@ func TestLoadCarriesRouteRefusalAndStillLists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recusa de uma sub-area nao invalida a rota, mas Load falhou: %v", err)
 	}
-	if queue.RouteRefusal != refusalPhrase {
-		t.Errorf("RouteRefusal = %q, quero a frase da rota %q", queue.RouteRefusal, refusalPhrase)
+	if queue.RouteRefusal != "" {
+		t.Errorf("recusa de 'kb' nao e problema da fila de issues, mas RouteRefusal = %q",
+			queue.RouteRefusal)
+	}
+	if queue.Repo != ceoRepo {
+		t.Errorf("Repo = %q, quero o repo que a rota resolveu (%q)", queue.Repo, ceoRepo)
 	}
 	if len(queue.Cards) != 2 {
 		t.Errorf("a fila devia ter sido lida apesar da recusa, cards = %d", len(queue.Cards))
 	}
 	if queue.Origin.Source != SourceUsina || queue.Origin.Reason != "" {
 		t.Errorf("recusa e dado, nao degradacao: Origin = %+v", queue.Origin)
+	}
+}
+
+// The `issues` area is the one the board reads, so its own refusal is the
+// queue's problem and has to arrive verbatim — escapes decoded, phrase intact.
+func TestLoadCarriesIssuesAreaRefusalVerbatim(t *testing.T) {
+	run := newFake(map[string]answer{
+		"usina rota show":  {stdout: routeIssuesRefused},
+		"usina issue list": {stdout: usinaListBody},
+	})
+
+	queue, err := Load(run.run, ceoRepo, label, limit)
+	if err != nil {
+		t.Fatalf("recusa em 'issues' nao invalida a rota, mas Load falhou: %v", err)
+	}
+	if queue.RouteRefusal != issuesRefusalPhrase {
+		t.Errorf("RouteRefusal = %q, quero a frase da rota %q",
+			queue.RouteRefusal, issuesRefusalPhrase)
+	}
+	if queue.Repo != ceoRepo {
+		t.Errorf("rota que nao nomeou repo de issues devia cair no proprio CEO: Repo = %q",
+			queue.Repo)
+	}
+	if queue.Origin.Reason == "" {
+		t.Error("rota sem repo de 'issues' e degradacao: Origin.Reason ficou vazio")
+	}
+	if len(queue.Cards) != 2 {
+		t.Errorf("a fila devia ter sido lida apesar da recusa, cards = %d", len(queue.Cards))
 	}
 }
 
@@ -436,5 +482,46 @@ func TestLoadRejectsMisWiredCall(t *testing.T) {
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("chamada mal-fiada executou binario: %v", run.calls)
+	}
+}
+
+// TestRunErrorNamesTheDeadlineInsteadOfSignalKilled: a child killed by the
+// context leaves stderr empty and ExitCode() -1, so forwarding it verbatim put
+// "saiu -1: signal: killed" on the board (measured on the owner's project) —
+// a Reason naming neither the deadline nor its value. ctxErr is the only
+// witness, and reading it is what separates the two failures.
+func TestRunErrorNamesTheDeadlineInsteadOfSignalKilled(t *testing.T) {
+	const prazo = 90 * time.Second
+	err := runError("usina", prazo, context.DeadlineExceeded, errors.New("signal: killed"), nil)
+	if err == nil {
+		t.Fatal("estouro de prazo voltou sem erro")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "prazo") {
+		t.Fatalf("erro %q nao diz que foi prazo", msg)
+	}
+	if !strings.Contains(msg, prazo.String()) {
+		t.Fatalf("erro %q nao nomeia o valor do prazo (%s)", msg, prazo)
+	}
+	if strings.Contains(msg, "signal: killed") {
+		t.Fatalf("erro %q repassou \"signal: killed\": nao explica nada a quem le o board", msg)
+	}
+}
+
+// TestRunErrorKeepsStderrWhenTheChildFailedOnItsOwn: usina refusing on its own
+// terms is a different failure, and its text is what reaches Origin.Reason.
+// Blaming the deadline for it would send the reader after the wrong defect.
+func TestRunErrorKeepsStderrWhenTheChildFailedOnItsOwn(t *testing.T) {
+	const refusal = "instancia da usina indeterminada: nenhum segmento 'ceo-<nome>' no cwd"
+	err := runError("usina", 90*time.Second, nil, errors.New("exit status 2"), []byte(refusal+"\n"))
+	if err == nil {
+		t.Fatal("falha do filho voltou sem erro")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, refusal) {
+		t.Fatalf("erro %q perdeu o stderr do filho (%q)", msg, refusal)
+	}
+	if strings.Contains(msg, "prazo") {
+		t.Fatalf("erro %q culpou o prazo numa falha que o filho diagnosticou sozinho", msg)
 	}
 }

@@ -103,7 +103,12 @@ The surrounding code is the specification. Beyond that:
   itself. Scripts branch on `$?`, so adding a code is a breaking change.
 - **Degrade rather than refuse.** A missing role charter weakens the prompt; it does not abort a run
   whose agent is already live. A failed `pane rename` is cosmetic. An unreadable run file starts
-  clean. But an unsupported Herdr fails closed, because the alternative is an untrackable agent.
+  clean. But an unsupported Herdr fails closed, because the alternative is an untrackable agent —
+  and so does a `hitl` card, which is the owner's own hands and not an agent's: `roles.Suggest`
+  answers `roles.ErrHumanOnly`, the role picker refuses to open and `dispatch.resolveRole` refuses
+  ahead of `--role` and the column's role. Only `roles.ErrNoCharter` still degrades, to the
+  configured default role. Do not collapse the two back into one answer: that is exactly how the
+  refusal was inert while its unit test stayed green.
 - **No new dependencies without a strong reason.** The four current ones are cobra, toml, yaml, and
   `x/term`. The TUI is hand-drawn partly to keep it that way.
 

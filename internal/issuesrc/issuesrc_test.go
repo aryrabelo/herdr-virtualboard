@@ -37,9 +37,54 @@ const (
 const (
 	ceoRepo = "aryrabelo/ceo-bora"
 	label   = "project:bugtoprompt"
-	kitPath = "/Users/aryrabelo/Sites/bora-team/ceo-bora/bin/kit.py"
 	slug    = "bugtoprompt"
+	// frontierOwner is the repository whose issues kit.py really ranks for
+	// the bugtoprompt project: measured 2026-09-17,
+	// projetos/bugtoprompt/charter.md says `repo: aryrabelo/bugtoprompt`.
+	frontierOwner = "aryrabelo/bugtoprompt"
 )
+
+// charterOf is where kit.py reads a project's repository from, spelled here
+// independently of the production helper on purpose: if the layout drifts, the
+// fixtures stop being found and these tests fail, instead of following the
+// change wherever it went.
+func charterOf(kit, project string) string {
+	return filepath.Join(filepath.Dir(filepath.Dir(kit)), "projetos", project, "charter.md")
+}
+
+// writeCharter writes one project charter with the given front matter and
+// returns its path.
+func writeCharter(t *testing.T, kit, project, frontMatter string) string {
+	t.Helper()
+	path := charterOf(kit, project)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir do charter: %v", err)
+	}
+	body := "---\n" + frontMatter + "\n---\n\n# charter\n\nO repo: desta prosa nao e front matter.\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("escrever o charter: %v", err)
+	}
+	return path
+}
+
+// kitIn builds a throwaway CEO repository — kit.py at bin/kit.py, plus the
+// project charter naming repo when it is not empty — and returns the kit.py
+// path. Nothing here is ever executed: the script exists only because the
+// repository root is derived from its path.
+func kitIn(t *testing.T, repo string) string {
+	t.Helper()
+	kit := filepath.Join(t.TempDir(), "bin", "kit.py")
+	if err := os.MkdirAll(filepath.Dir(kit), 0o755); err != nil {
+		t.Fatalf("mkdir do bin: %v", err)
+	}
+	if err := os.WriteFile(kit, []byte("# nunca executado\n"), 0o644); err != nil {
+		t.Fatalf("escrever kit.py: %v", err)
+	}
+	if repo != "" {
+		writeCharter(t, kit, slug, "repo: "+repo)
+	}
+	return kit
+}
 
 type answer struct {
 	stdout string
@@ -81,15 +126,17 @@ func (f *fake) asked(prefix string) bool {
 
 func healthy() *fake {
 	return newFake(map[string]answer{
-		"usina rota show":    {stdout: routeBody},
-		"usina issue list":   {stdout: listBody},
-		"python3 " + kitPath: {stdout: frontierBody},
+		"usina rota show":  {stdout: routeBody},
+		"usina issue list": {stdout: listBody},
+		"python3":          {stdout: frontierBody},
 	})
 }
 
+// load reads the queue with the frontier repository derived from the charter,
+// which is how the command asks for it: nothing declares it.
 func load(t *testing.T, run *fake, kit, project string) ([]*feature.Spec, []error) {
 	t.Helper()
-	specs, errs := New(run.run, ceoRepo, label, kit, project, ceoRepo, 30).Load(context.Background())
+	specs, errs := New(run.run, ceoRepo, label, kit, project, "", 30).Load(context.Background())
 	return specs, errs
 }
 
@@ -108,7 +155,7 @@ func byNumber(t *testing.T, specs []*feature.Spec, number int) *feature.Spec {
 // not in one this package invented. #160 is assigned AND hitl, and hitl wins.
 func TestColumnIsFilasDecisionIncludingHITLOverAssignee(t *testing.T) {
 	run := healthy()
-	specs, errs := load(t, run, kitPath, slug)
+	specs, errs := load(t, run, kitIn(t, ceoRepo), slug)
 	if len(errs) != 0 {
 		t.Fatalf("fila saudavel nao devia reportar problema: %v", errs)
 	}
@@ -135,7 +182,8 @@ func TestColumnIsFilasDecisionIncludingHITLOverAssignee(t *testing.T) {
 // number moves the column.
 func TestFrontierRanksAndBlocks(t *testing.T) {
 	run := healthy()
-	specs, _ := load(t, run, kitPath, slug)
+	kit := kitIn(t, ceoRepo)
+	specs, _ := load(t, run, kit, slug)
 	if got := issueNumber(specs[0]); got != 31 {
 		t.Errorf("primeiro card e #%d, quero #31: a fronteira rankeou essa", got)
 	}
@@ -152,10 +200,10 @@ func TestFrontierRanksAndBlocks(t *testing.T) {
 	blocked := newFake(map[string]answer{
 		"usina rota show":  {stdout: routeBody},
 		"usina issue list": {stdout: listBody},
-		"python3 " + kitPath: {stdout: `{"pronto": [], "bloqueado": ` +
+		"python3": {stdout: `{"pronto": [], "bloqueado": ` +
 			`[{"titulo": "CI vermelho no deploy", "numero": 31, "porque": "espera credencial"}]}`},
 	})
-	specs, _ = load(t, blocked, kitPath, slug)
+	specs, _ = load(t, blocked, kit, slug)
 	if got := byNumber(t, specs, 31).Status; got != feature.Blocked {
 		t.Errorf("#31 na lista de bloqueado caiu em %q, quero %q", got, feature.Blocked)
 	}
@@ -188,12 +236,12 @@ func TestWithoutFrontierTheBoardStillDrawsAndKitIsNotRun(t *testing.T) {
 // card itself. This is the property the whole composition exists for.
 func TestDegradationToGHIsReportedAndLabelled(t *testing.T) {
 	run := newFake(map[string]answer{
-		"usina rota show":    {stdout: routeBody},
-		"usina issue list":   {err: errors.New("exit status 1")},
-		"gh issue list":      {stdout: listBody},
-		"python3 " + kitPath: {stdout: frontierBody},
+		"usina rota show":  {stdout: routeBody},
+		"usina issue list": {err: errors.New("exit status 1")},
+		"gh issue list":    {stdout: listBody},
+		"python3":          {stdout: frontierBody},
 	})
-	specs, errs := load(t, run, kitPath, slug)
+	specs, errs := load(t, run, kitIn(t, ceoRepo), slug)
 	if len(specs) != 3 {
 		t.Fatalf("degradacao perdeu cards: li %d, quero 3", len(specs))
 	}
@@ -217,11 +265,11 @@ func TestDegradationToGHIsReportedAndLabelled(t *testing.T) {
 // An unread frontier costs the ranking and says so; it never costs the cards.
 func TestUnreadFrontierKeepsTheCardsAndNamesTheFailure(t *testing.T) {
 	run := newFake(map[string]answer{
-		"usina rota show":    {stdout: routeBody},
-		"usina issue list":   {stdout: listBody},
-		"python3 " + kitPath: {stdout: "nao e json"},
+		"usina rota show":  {stdout: routeBody},
+		"usina issue list": {stdout: listBody},
+		"python3":          {stdout: "nao e json"},
 	})
-	specs, errs := load(t, run, kitPath, slug)
+	specs, errs := load(t, run, kitIn(t, ceoRepo), slug)
 	if len(specs) != 3 {
 		t.Fatalf("fronteira ilegivel derrubou cards: li %d, quero 3", len(specs))
 	}
@@ -234,17 +282,19 @@ func TestUnreadFrontierKeepsTheCardsAndNamesTheFailure(t *testing.T) {
 // red: deploy on main"); aryrabelo/ceo-bora#31 is an unrelated issue. Joining
 // the frontier onto this queue by number alone would have moved a card that
 // merely shares an integer, so the join is refused and said out loud.
+//
+// This is today's real wiring: the board reads aryrabelo/ceo-bora's issues and
+// projetos/bugtoprompt/charter.md says kit.py ranks aryrabelo/bugtoprompt.
 func TestFrontierOfAnotherRepositoryIsNeverJoinedByNumber(t *testing.T) {
 	blocking := `{"pronto": [], "bloqueado": [{"titulo": "CI red: deploy on main", ` +
 		`"numero": 160, "porque": "espera credencial"}]}`
 	run := newFake(map[string]answer{
-		"usina rota show":    {stdout: routeBody},
-		"usina issue list":   {stdout: listBody},
-		"python3 " + kitPath: {stdout: blocking},
+		"usina rota show":  {stdout: routeBody},
+		"usina issue list": {stdout: listBody},
+		"python3":          {stdout: blocking},
 	})
 
-	specs, errs := New(run.run, ceoRepo, label, kitPath, slug,
-		"aryrabelo/bugtoprompt", 30).Load(context.Background())
+	specs, errs := load(t, run, kitIn(t, frontierOwner), slug)
 	if len(specs) != 3 {
 		t.Fatalf("li %d cards, quero 3", len(specs))
 	}
@@ -252,7 +302,7 @@ func TestFrontierOfAnotherRepositoryIsNeverJoinedByNumber(t *testing.T) {
 	if !strings.Contains(joined, "different issues") {
 		t.Errorf("a recusa de juntar nao foi dita: %q", joined)
 	}
-	if !strings.Contains(joined, "aryrabelo/bugtoprompt") || !strings.Contains(joined, ceoRepo) {
+	if !strings.Contains(joined, frontierOwner) || !strings.Contains(joined, ceoRepo) {
 		t.Errorf("a recusa nao nomeia os dois repos: %q", joined)
 	}
 	for _, spec := range specs {
@@ -268,35 +318,143 @@ func TestFrontierOfAnotherRepositoryIsNeverJoinedByNumber(t *testing.T) {
 	if got := byNumber(t, specs, 31).Status; got != feature.Backlog {
 		t.Errorf("#31 caiu em %q por colisao de numero, quero %q", got, feature.Backlog)
 	}
+}
 
-	// The same frontier, asked for without naming any repository at all, is
-	// equally refused: silence is not permission.
-	_, errs = New(run.run, ceoRepo, label, kitPath, slug, "", 30).Load(context.Background())
-	if !strings.Contains(joinErrors(errs), "nothing named the repository") {
-		t.Errorf("fronteira sem repo nomeado foi aceita em silencio: %q", joinErrors(errs))
+// The repository kit.py ranks is derived, not declared: the charter is the
+// same file kit.py reads to decide it, so a board pointed at that repository
+// ranks without anybody typing an owner/name.
+func TestFrontierRepositoryIsDerivedFromTheCharter(t *testing.T) {
+	// The queue itself is aryrabelo/ceo-bora, so this is the charter of a
+	// project whose work lives in the CEO repository.
+	kit := kitIn(t, ceoRepo)
+	specs, errs := load(t, healthy(), kit, slug)
+	if len(errs) != 0 {
+		t.Fatalf("repo derivado do charter nao devia reportar problema: %v", errs)
+	}
+	if !specs[0].HasLabel(LabelRankPrefix + "0") {
+		t.Errorf("a fronteira nao foi juntada com o repo derivado: %v", specs[0].Labels)
+	}
+	if got := charterOf(kit, slug); !strings.Contains(got, filepath.Join("projetos", slug)) {
+		t.Fatalf("o charter lido foi %q, que nao e o caminho que kit.py le", got)
 	}
 }
 
-// The route's refusal is data: the cards it did route are still read.
+// A declared --kit-repo the charter contradicts is a wrong declaration, and it
+// has to read as one: the alternative is a board that ranks by number because
+// a human typed the wrong owner/name.
+func TestDeclaredKitRepoTheCharterContradictsRefusesTheJoin(t *testing.T) {
+	kit := kitIn(t, ceoRepo)
+	charter := charterOf(kit, slug)
+	specs, errs := New(healthy().run, ceoRepo, label, kit, slug, frontierOwner, 30).
+		Load(context.Background())
+	if len(specs) != 3 {
+		t.Fatalf("li %d cards, quero 3", len(specs))
+	}
+	joined := joinErrors(errs)
+	for _, want := range []string{frontierOwner, ceoRepo, charter} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("a recusa nao nomeia %q: %q", want, joined)
+		}
+	}
+	if specs[0].HasLabel(LabelRankPrefix + "0") {
+		t.Errorf("a fronteira foi juntada com a declaracao desmentida: %v", specs[0].Labels)
+	}
+}
+
+// An agreeing declaration is not an error: it says the same thing the charter
+// says, and case is not a disagreement.
+func TestDeclaredKitRepoAgreeingWithTheCharterJoins(t *testing.T) {
+	kit := kitIn(t, ceoRepo)
+	specs, errs := New(healthy().run, ceoRepo, label, kit, slug,
+		strings.ToUpper(ceoRepo), 30).Load(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("declaracao concordante foi tratada como erro: %v", errs)
+	}
+	if !specs[0].HasLabel(LabelRankPrefix + "0") {
+		t.Errorf("declaracao concordante impediu a juncao: %v", specs[0].Labels)
+	}
+}
+
+// Absence is absence. Without a charter there is nothing that names the
+// ranked repository — kit.py reads that same file, so it could not have ranked
+// this queue either — and the refusal names the exact path that was looked up
+// instead of falling back to the CEO repository.
+func TestMissingCharterRefusesTheJoinAndNamesThePath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		front string
+	}{
+		{name: "sem charter"},
+		{name: "charter sem repo", front: "slug: bugtoprompt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kit := kitIn(t, "")
+			if tc.front != "" {
+				writeCharter(t, kit, slug, tc.front)
+			}
+			specs, errs := load(t, healthy(), kit, slug)
+			if len(specs) != 3 {
+				t.Fatalf("li %d cards, quero 3", len(specs))
+			}
+			joined := joinErrors(errs)
+			if !strings.Contains(joined, charterOf(kit, slug)) {
+				t.Errorf("a recusa nao nomeia o caminho procurado %q: %q",
+					charterOf(kit, slug), joined)
+			}
+			if !strings.Contains(joined, "does not name the repository") {
+				t.Errorf("a recusa nao diz que nada nomeou o repo: %q", joined)
+			}
+			for _, spec := range specs {
+				for _, label := range spec.Labels {
+					if strings.HasPrefix(label, LabelRankPrefix) {
+						t.Errorf("%s ganhou %q sem charter que nomeie o repo",
+							spec.ID, label)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A sibling area's refusal is not this board's problem, and the `issues`
+// area's own refusal is.
 //
 // Measured shape: `recusa` lives INSIDE the area that refused, never at the
 // top level. `usina rota show --repo aryrabelo/ceo-bora` really answers
 // `"kb": {"recusa": "'kb' ausente ou nao-mapping…"}` while routing `issues`
-// perfectly well, which is exactly why the refusal must not be fatal.
-func TestRouteRefusalIsReportedWithoutLosingCards(t *testing.T) {
+// perfectly well — kb is the team's knowledge base, which no kanban card is
+// ever read from — so surfacing it lit a problem on every single board over
+// this repository and taught the owner to ignore the problem line.
+func TestSiblingAreaRefusalIsNotAProblemButTheIssuesAreaIs(t *testing.T) {
 	run := newFake(map[string]answer{
 		"usina rota show": {stdout: `{"repo": "aryrabelo/ceo-bora", ` +
 			`"issues": "aryrabelo/ceo-bora", "config": "ceo-bora.yml", ` +
 			`"kb": {"recusa": "'kb' ausente ou nao-mapping em usina-config (ceo-bora.yml)"}}`},
-		"usina issue list":   {stdout: listBody},
-		"python3 " + kitPath: {stdout: frontierBody},
+		"usina issue list": {stdout: listBody},
+		"python3":          {stdout: frontierBody},
 	})
-	specs, errs := load(t, run, kitPath, slug)
+	specs, errs := load(t, run, kitIn(t, ceoRepo), slug)
 	if len(specs) != 3 {
-		t.Fatalf("recusa da rota derrubou cards: li %d, quero 3", len(specs))
+		t.Fatalf("recusa de area vizinha derrubou cards: li %d, quero 3", len(specs))
 	}
-	if !strings.Contains(joinErrors(errs), "'kb' ausente") {
-		t.Errorf("a recusa da rota nao chegou ao usuario: %q", joinErrors(errs))
+	if len(errs) != 0 {
+		t.Errorf("recusa do 'kb' virou problema num board que nunca le kb: %v", errs)
+	}
+
+	// The area this board does read is the opposite case: its refusal is
+	// about the queue itself, so it has to be said.
+	refused := newFake(map[string]answer{
+		"usina rota show": {stdout: `{"repo": "aryrabelo/ceo-bora", ` +
+			`"issues": {"recusa": "'issues' ausente em usina-config (ceo-bora.yml)"}}`},
+		"usina issue list": {stdout: listBody},
+		"python3":          {stdout: frontierBody},
+	})
+	specs, errs = load(t, refused, kitIn(t, ceoRepo), slug)
+	if len(specs) != 3 {
+		t.Fatalf("recusa da area issues derrubou cards: li %d, quero 3", len(specs))
+	}
+	if !strings.Contains(joinErrors(errs), "'issues' ausente") {
+		t.Errorf("a recusa da propria area issues nao chegou ao usuario: %q", joinErrors(errs))
 	}
 }
 
@@ -308,7 +466,7 @@ func TestBothSourcesDeadIsAnErrorNotAnEmptyBoard(t *testing.T) {
 		"usina issue list": {err: errors.New("no such file")},
 		"gh issue list":    {err: errors.New("no such file")},
 	})
-	specs, errs := load(t, run, kitPath, slug)
+	specs, errs := load(t, run, kitIn(t, ceoRepo), slug)
 	if len(specs) != 0 {
 		t.Errorf("li %d cards sem fonte viva", len(specs))
 	}
@@ -450,7 +608,7 @@ func TestCancelledContextIsReported(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	run := healthy()
-	_, errs := New(run.run, ceoRepo, label, kitPath, slug, ceoRepo, 30).Load(ctx)
+	_, errs := New(run.run, ceoRepo, label, kitIn(t, ceoRepo), slug, "", 30).Load(ctx)
 	if len(errs) != 1 || !errors.Is(errs[0], context.Canceled) {
 		t.Fatalf("errs = %v, quero context.Canceled", errs)
 	}
@@ -506,5 +664,161 @@ func TestDirRunnerRunsChildrenInTheGivenDirectory(t *testing.T) {
 	if strings.TrimSpace(string(stdout)) != here {
 		t.Errorf("dir vazio rodou em %q, quero o diretorio atual %q",
 			strings.TrimSpace(string(stdout)), here)
+	}
+}
+
+// ceoDirIn builds a real directory whose last segment is name, so a path that
+// usina would accept can be handed to a runner that really runs something.
+func ceoDirIn(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir de %s: %v", dir, err)
+	}
+	return dir
+}
+
+// pwdOf is the directory a runner's children really land in, which is the only
+// thing that proves WHICH directory reached the runner: usina reads its
+// instance off exactly this value.
+func pwdOf(t *testing.T, run Runner) string {
+	t.Helper()
+	stdout, err := run("pwd")
+	if err != nil {
+		t.Fatalf("pwd: %v", err)
+	}
+	return resolved(t, strings.TrimSpace(string(stdout)))
+}
+
+// resolved is dir with the symlinks gone: on macOS a t.TempDir() lives under
+// /var, which pwd reports as /private/var, and comparing the two raw forms
+// would fail for a reason that has nothing to do with the code.
+func resolved(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks de %s: %v", dir, err)
+	}
+	return out
+}
+
+// The two facts that used to travel in one flag. --kit means "rank the cards";
+// where the CEO repository is, is a separate question, and the answer to it
+// wins. Measured 2026-09-17: a board opened from an execution repository
+// without --kit ran usina from there, got "instância da usina indeterminada:
+// nenhum segmento 'ceo-<nome>' no cwd", and read the whole queue through gh.
+func TestDeclaredCEORootBeatsTheKitDerivation(t *testing.T) {
+	t.Setenv("USINA_CONFIG", "")
+	declared := ceoDirIn(t, "ceo-bora")
+	kit := kitIn(t, frontierOwner)
+	if CEORoot(kit) == declared {
+		t.Fatalf("fixture inutil: --kit deriva o mesmo diretorio %q", declared)
+	}
+
+	dir, problem := WorkDir(declared, kit)
+	if dir != declared {
+		t.Fatalf("WorkDir = %q, quero o declarado %q", dir, declared)
+	}
+	if problem != nil {
+		t.Errorf("%q tem segmento ceo-, nao ha o que reportar: %v", declared, problem)
+	}
+	if got := pwdOf(t, DirRunner(dir)); got != resolved(t, declared) {
+		t.Errorf("filho rodou em %q, quero %q: a usina resolveria a instancia errada", got, resolved(t, declared))
+	}
+}
+
+// The derivation that exists today stays alive: a caller passing only the
+// frontier flags keeps the directory it has always got, so nothing that works
+// now needs a second flag to keep working.
+func TestWithoutADeclaredCEORootTheKitDerivationSurvives(t *testing.T) {
+	kit := kitIn(t, frontierOwner)
+	dir, _ := WorkDir("   ", kit)
+	if dir != CEORoot(kit) {
+		t.Fatalf("WorkDir = %q, quero a derivacao de --kit %q", dir, CEORoot(kit))
+	}
+	if got := pwdOf(t, DirRunner(dir)); got != resolved(t, CEORoot(kit)) {
+		t.Errorf("filho rodou em %q, quero %q", got, resolved(t, CEORoot(kit)))
+	}
+}
+
+// With neither answer there is nothing to derive from, and a path invented
+// here would send every child somewhere nobody asked for. Empty means here,
+// which is right for the board launched from inside the CEO checkout.
+func TestWithNeitherAnswerTheChildrenRunWhereTheBoardWasLaunched(t *testing.T) {
+	dir, _ := WorkDir("", "")
+	if dir != "" {
+		t.Fatalf("WorkDir inventou %q; sem os dois so existe o diretorio atual", dir)
+	}
+	here, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if got := pwdOf(t, DirRunner(dir)); got != resolved(t, here) {
+		t.Errorf("filho rodou em %q, quero o diretorio atual %q", got, resolved(t, here))
+	}
+}
+
+// usina's refusal is a property of the PATH, so the board can measure it
+// before spending a subprocess on it. It is reported and the board still
+// opens: the gh fallback answers, so refusing to open would cost the user a
+// board that works in part.
+func TestADirectoryWithoutACEOSegmentIsReportedOnTheBoard(t *testing.T) {
+	t.Setenv("USINA_CONFIG", "")
+	declared := ceoDirIn(t, "bugtoprompt")
+
+	_, problem := WorkDir(declared, "")
+	if problem == nil {
+		t.Fatalf("%q nao tem segmento ceo-: a usina recusa e o board tem de dizer isso", declared)
+	}
+	if !strings.Contains(problem.Error(), declared) {
+		t.Errorf("o problema nao nomeia o diretorio %q: %v", declared, problem)
+	}
+	if !strings.Contains(problem.Error(), "ceo-") {
+		t.Errorf("o problema nao diz o que falta no caminho: %v", problem)
+	}
+
+	run := healthy()
+	specs, errs := New(run.run, ceoRepo, label, "", "", "", 30).
+		Note(problem).
+		Load(context.Background())
+	if len(specs) != 3 {
+		t.Fatalf("li %d cards, quero 3: a recusa da usina nao pode fechar o board", len(specs))
+	}
+	if joined := joinErrors(errs); !strings.Contains(joined, declared) {
+		t.Errorf("o board nao disse em que diretorio os filhos rodam: %q", joined)
+	}
+}
+
+// A directory usina accepts has nothing to report, including a worktree, whose
+// name keeps the ceo-<name> prefix. A board that complained here would be a
+// board whose problem line the owner learns to ignore.
+func TestADirectoryWithACEOSegmentHasNothingToSay(t *testing.T) {
+	t.Setenv("USINA_CONFIG", "")
+	for _, name := range []string{"ceo-bora", "ceo-pp", "ceo-bora-epic-269"} {
+		if _, problem := WorkDir(ceoDirIn(t, name), ""); problem != nil {
+			t.Errorf("%s e uma instancia da usina, nada a reportar: %v", name, problem)
+		}
+	}
+}
+
+// "ceo-" inside a word is not a segment: usina resolves the instance from a
+// path SEGMENT named ceo-<name>, so staying quiet for traceo-tmp would be
+// staying quiet about a board that is about to be read by gh.
+func TestCEOInsideAWordIsNotAnInstance(t *testing.T) {
+	t.Setenv("USINA_CONFIG", "")
+	for _, name := range []string{"traceo-tmp", "ceo", "ceo-"} {
+		if _, problem := WorkDir(ceoDirIn(t, name), ""); problem == nil {
+			t.Errorf("%s nao nomeia instancia nenhuma, a usina recusaria em silencio", name)
+		}
+	}
+}
+
+// USINA_CONFIG names the instance outright — it is the second half of usina's
+// own refusal ("ou aponte USINA_CONFIG pro yml da instância") — so with it set
+// the path is no longer evidence of anything.
+func TestUsinaConfigMakesThePathIrrelevant(t *testing.T) {
+	t.Setenv("USINA_CONFIG", filepath.Join(t.TempDir(), "instancia.yml"))
+	if _, problem := WorkDir(ceoDirIn(t, "bugtoprompt"), ""); problem != nil {
+		t.Errorf("com USINA_CONFIG a usina responde de qualquer diretorio: %v", problem)
 	}
 }

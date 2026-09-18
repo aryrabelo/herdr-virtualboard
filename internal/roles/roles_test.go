@@ -1,11 +1,19 @@
 package roles
 
 import (
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/virtualboard/herdr-virtualboard/internal/feature"
+	"github.com/virtualboard/herdr-virtualboard/internal/fila"
 )
 
 // agentsDir writes a charter set shaped like the one
@@ -111,9 +119,154 @@ func TestSuggestFromLabels(t *testing.T) {
 	for label, want := range cases {
 		spec := &feature.Spec{Frontmatter: feature.Frontmatter{
 			ID: "FTR-0001", Status: feature.InProgress, Labels: []string{label}}}
-		role, ok := Suggest(loaded, spec, "fullstack_dev")
-		if !ok || role.Key != want {
-			t.Errorf("label %q suggested %q, want %q", label, role.Key, want)
+		role, err := Suggest(loaded, spec, "fullstack_dev")
+		if err != nil || role.Key != want {
+			t.Errorf("label %q suggested %q (err=%v), want %q", label, role.Key, err, want)
+		}
+	}
+}
+
+// queueAgentsDir writes the charter set the owner's queue board loads from
+// `~/Sites/bora-team/ceo-bora/.virtualboard/agents`, in a temp directory: a
+// test that read the real one would pass or fail with the owner's machine.
+func queueAgentsDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	charters := []struct{ key, name, description string }{
+		{"executor", "executor", "Implementa uma folha ja fatiada contra o aceite escrito nela"},
+		{"grilling", "grilling", "Afia plano ou decisao por interrogatorio, sem implementar"},
+		{"cartografo", "cartografo", "Decompoe um esforco em folhas com aceite verificavel"},
+	}
+	for _, charter := range charters {
+		body := "---\nname: " + charter.name + "\ndescription: " + charter.description +
+			"\n---\n\n# " + charter.key + "\n\nCharter body for " + charter.key + ".\n"
+		if err := os.WriteFile(filepath.Join(dir, charter.key+".md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# system doc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// queueAgentsDirWithSentinel adds one charter no label and no hint names, so a
+// Suggest test can pass it as the fallback. Without it, an answer that fell
+// through the hint table would read as the role the case expected: the
+// fallback for a `rumo:task` card is naturally `executor` too.
+func queueAgentsDirWithSentinel(t *testing.T) string {
+	t.Helper()
+	dir := queueAgentsDir(t)
+	body := "---\nname: sentinela\ndescription: nobody's hint points here\n---\n\n# sentinela\n"
+	if err := os.WriteFile(filepath.Join(dir, "sentinela.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The owner's queue speaks `rumo:*`, not the upstream `frontend`/`backend`
+// vocabulary: of the 33 issues labelled `project:bugtoprompt` in
+// aryrabelo/ceo-bora, 16 carry `rumo:task`, 9 `rumo:grilling` and 2 `rumo:map`,
+// and none carries any upstream hint label. Unmapped, every one of those cards
+// got the same fallback role.
+func TestSuggestFromTheOwnersRumoLabels(t *testing.T) {
+	loaded, _ := Load(queueAgentsDirWithSentinel(t))
+	cases := map[string]string{
+		"rumo:task":     "executor",
+		"rumo:grilling": "grilling",
+		"rumo:map":      "cartografo",
+	}
+	for label, want := range cases {
+		spec := &feature.Spec{Frontmatter: feature.Frontmatter{
+			ID: "FTR-0001", Status: feature.InProgress, Labels: []string{"folha", label}}}
+		role, err := Suggest(loaded, spec, "sentinela")
+		if err != nil || role.Key != want {
+			t.Errorf("label %q suggested %q (err=%v), want %q", label, role.Key, err, want)
+		}
+	}
+}
+
+// A `hitl` card is work only the owner's hands can close, so no charter fits
+// it. The refusal has to beat the hints and the `role:` label both: an agent
+// dispatched onto one would spend tokens on a task it cannot finish.
+func TestSuggestRefusesHumanOnlyCards(t *testing.T) {
+	loaded, _ := Load(queueAgentsDirWithSentinel(t))
+	cases := map[string][]string{
+		"hitl alone":               {"hitl"},
+		"hitl before a hint":       {"hitl", "rumo:task"},
+		"hitl after a hint":        {"folha", "rumo:task", "hitl"},
+		"hitl with explicit role":  {"role:executor", "hitl"},
+		"hitl in the board's case": {"HITL"},
+	}
+	for name, labels := range cases {
+		spec := &feature.Spec{Frontmatter: feature.Frontmatter{
+			ID: "FTR-0001", Status: feature.InProgress, Labels: labels}}
+		role, err := Suggest(loaded, spec, "sentinela")
+		if !errors.Is(err, ErrHumanOnly) {
+			t.Errorf("%s: Suggest resolved %q (err=%v), want ErrHumanOnly (hitl is not dispatchable)", name, role.Key, err)
+			continue
+		}
+		// The refusal is what both callers print, so it has to name the
+		// card and the reason on its own: the board shows it verbatim.
+		for _, want := range []string{"FTR-0001", fila.LabelHITL} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: refusal %q does not name %q", name, err, want)
+			}
+		}
+		// ErrNoCharter is the answer that dispatches under the default
+		// role, so a refusal must never also read as one.
+		if errors.Is(err, ErrNoCharter) {
+			t.Errorf("%s: refusal also reads as ErrNoCharter: %v", name, err)
+		}
+	}
+	// A charter set is not what makes a card human-only, so the refusal
+	// stands even with no charters at all — otherwise this card would
+	// answer ErrNoCharter, which dispatches under the configured role.
+	bare := &feature.Spec{Frontmatter: feature.Frontmatter{ID: "FTR-0003", Labels: []string{"hitl"}}}
+	if _, err := Suggest(nil, bare, "sentinela"); !errors.Is(err, ErrHumanOnly) {
+		t.Errorf("hitl over an empty charter set = %v, want ErrHumanOnly", err)
+	}
+	// Control: the same charter set does resolve a card without `hitl`, so
+	// the refusals above are the label's doing and not an inert fixture.
+	spec := &feature.Spec{Frontmatter: feature.Frontmatter{
+		ID: "FTR-0002", Status: feature.InProgress, Labels: []string{"folha", "rumo:task"}}}
+	if role, err := Suggest(loaded, spec, "sentinela"); err != nil || role.Key != "executor" {
+		t.Fatalf("control card suggested %q (err=%v), want executor", role.Key, err)
+	}
+}
+
+// The explicit `role:` label still beats a hint on the owner's charter keys.
+func TestSuggestPrefersAnExplicitOwnerRoleLabel(t *testing.T) {
+	loaded, _ := Load(queueAgentsDir(t))
+	spec := &feature.Spec{Frontmatter: feature.Frontmatter{
+		ID: "FTR-0001", Status: feature.InProgress, Labels: []string{"rumo:task", "role:cartografo"}}}
+	role, err := Suggest(loaded, spec, "executor")
+	if err != nil || role.Key != "cartografo" {
+		t.Fatalf("Suggest = %q (err=%v), want cartografo", role.Key, err)
+	}
+}
+
+// Load over the owner's charter set answers exactly the three roles, with the
+// frontmatter name and description of each, and not AGENTS.
+func TestLoadTheOwnersCharterSet(t *testing.T) {
+	loaded, err := Load(queueAgentsDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cartografo", "executor", "grilling"}
+	got := keys(loaded)
+	if len(got) != len(want) {
+		t.Fatalf("Load = %v, want %v", got, want)
+	}
+	for index, key := range want {
+		if got[index] != key {
+			t.Fatalf("Load = %v, want %v", got, want)
+		}
+		if loaded[index].Name != key {
+			t.Errorf("%s: Name = %q, want the frontmatter name", key, loaded[index].Name)
+		}
+		if loaded[index].Description == "" {
+			t.Errorf("%s: Description should come from the frontmatter", key)
 		}
 	}
 }
@@ -124,9 +277,9 @@ func TestSuggestPrefersAnExplicitRoleLabel(t *testing.T) {
 	loaded, _ := Load(agentsDir(t))
 	spec := &feature.Spec{Frontmatter: feature.Frontmatter{
 		ID: "FTR-0001", Status: feature.Review, Labels: []string{"backend", "role:devops_engineer"}}}
-	role, ok := Suggest(loaded, spec, "fullstack_dev")
-	if !ok || role.Key != "devops_engineer" {
-		t.Fatalf("Suggest = %q, want devops_engineer", role.Key)
+	role, err := Suggest(loaded, spec, "fullstack_dev")
+	if err != nil || role.Key != "devops_engineer" {
+		t.Fatalf("Suggest = %q (err=%v), want devops_engineer", role.Key, err)
 	}
 }
 
@@ -136,9 +289,9 @@ func TestSuggestRoutesReviewToQA(t *testing.T) {
 	loaded, _ := Load(agentsDir(t))
 	spec := &feature.Spec{Frontmatter: feature.Frontmatter{
 		ID: "FTR-0001", Status: feature.Review, Labels: []string{"unmapped-label"}}}
-	role, ok := Suggest(loaded, spec, "fullstack_dev")
-	if !ok || role.Key != "qa" {
-		t.Fatalf("Suggest for a review feature = %q, want qa", role.Key)
+	role, err := Suggest(loaded, spec, "fullstack_dev")
+	if err != nil || role.Key != "qa" {
+		t.Fatalf("Suggest for a review feature = %q (err=%v), want qa", role.Key, err)
 	}
 }
 
@@ -146,15 +299,21 @@ func TestSuggestFallsBackToTheConfiguredDefault(t *testing.T) {
 	loaded, _ := Load(agentsDir(t))
 	spec := &feature.Spec{Frontmatter: feature.Frontmatter{
 		ID: "FTR-0001", Status: feature.InProgress, Labels: []string{"nothing-maps-here"}}}
-	role, ok := Suggest(loaded, spec, "devops_engineer")
-	if !ok || role.Key != "devops_engineer" {
-		t.Fatalf("Suggest = %q, want the configured fallback", role.Key)
+	role, err := Suggest(loaded, spec, "devops_engineer")
+	if err != nil || role.Key != "devops_engineer" {
+		t.Fatalf("Suggest = %q (err=%v), want the configured fallback", role.Key, err)
 	}
 }
 
-func TestSuggestWithNoRolesReportsNotFound(t *testing.T) {
-	if _, ok := Suggest(nil, nil, "backend_dev"); ok {
-		t.Fatal("Suggest over an empty charter set should report not found")
+// A charter set with nothing in it is not a refusal: it is ErrNoCharter, the
+// answer dispatch turns into the configured default role.
+func TestSuggestWithNoRolesReportsNoCharter(t *testing.T) {
+	_, err := Suggest(nil, nil, "backend_dev")
+	if !errors.Is(err, ErrNoCharter) {
+		t.Fatalf("Suggest over an empty charter set = %v, want ErrNoCharter", err)
+	}
+	if errors.Is(err, ErrHumanOnly) {
+		t.Fatalf("an empty charter set must not read as a refusal: %v", err)
 	}
 }
 
@@ -176,4 +335,101 @@ func keys(list []Role) []string {
 		out[index] = role.Key
 	}
 	return out
+}
+
+// This fails to compile if Suggest ever answers with anything but an error
+// again. A bool second result is what made the refusal inert, because a
+// dropped bool reads as "I do not care about a hint" and no reader or linter
+// objects; this line is the cheapest possible lock on the shape.
+var _ func([]Role, *feature.Spec, string) (Role, error) = Suggest
+
+// The shape is only half the defence: a caller can still write `role, _ :=`.
+// So this walks every call site in the module and fails on any that drops the
+// second result, which is exactly the regression that shipped a green
+// Suggest test alongside a board that dispatched human-only cards anyway.
+//
+// It is a lint expressed as a test because there is no other place in this
+// module that runs one, and because the rule it defends is not observable in
+// any single package's behaviour: it is a property of the call sites.
+func TestNoCallerDiscardsTheRefusal(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	calls, offenders := 0, []string(nil)
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "vendor", "testdata":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch stmt := node.(type) {
+			case *ast.AssignStmt:
+				if len(stmt.Rhs) != 1 || !callsSuggest(stmt.Rhs[0]) {
+					return true
+				}
+				calls++
+				// One left-hand side means the second result was
+				// never named, which Go only allows for a
+				// single-result function — so a rewrite that
+				// dropped the error entirely lands here too.
+				if len(stmt.Lhs) < 2 {
+					offenders = append(offenders, fmt.Sprintf("%s: Suggest called for its role alone", fset.Position(stmt.Pos())))
+					return true
+				}
+				if name, ok := stmt.Lhs[1].(*ast.Ident); ok && name.Name == "_" {
+					offenders = append(offenders, fmt.Sprintf("%s: the refusal is discarded into `_`", fset.Position(stmt.Pos())))
+				}
+			case *ast.ExprStmt:
+				if callsSuggest(stmt.X) {
+					calls++
+					offenders = append(offenders, fmt.Sprintf("%s: Suggest called as a statement, discarding everything", fset.Position(stmt.Pos())))
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+	// Without this the guard would pass on a walk that found nothing —
+	// a moved module root or a renamed function would read as compliance.
+	if calls < 2 {
+		t.Fatalf("found %d Suggest call sites under %s; the two real callers (tui and dispatch) plus this package's tests should all be there, so this guard proved nothing", calls, root)
+	}
+	for _, offender := range offenders {
+		t.Errorf("%s (branch on roles.ErrHumanOnly and roles.ErrNoCharter instead)", offender)
+	}
+}
+
+// callsSuggest matches both spellings: `Suggest` inside this package and
+// `roles.Suggest` everywhere else.
+func callsSuggest(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name == "Suggest"
+	case *ast.SelectorExpr:
+		pkg, ok := fun.X.(*ast.Ident)
+		return ok && pkg.Name == "roles" && fun.Sel.Name == "Suggest"
+	}
+	return false
 }

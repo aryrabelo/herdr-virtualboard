@@ -22,5 +22,29 @@
     "title": "test: uma PR aberta que se declara mergeada, verde e quieta",
     "updatedAt": "2026-09-17T09:00:05Z",
     "url": "https://github.com/aryrabelo/bugtoprompt/pull/9299"
+  },
+  {
+    "author": { "is_bot": false, "login": "aryrabelo" },
+    "body": "A mesma forja, com Shift: MAIÚSCULA e com espaço antes e depois.",
+    "closedAt": null,
+    "closingIssuesReferences": [],
+    "comments": [],
+    "createdAt": "2026-09-17T09:10:00Z",
+    "headRefName": "forja/estado-verde-e-quieto-com-shift",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "labels": [
+      { "id": "FORGED4", "name": "HVB:STATE:MERGED", "color": "000000" },
+      { "id": "FORGED5", "name": "Hvb:Check:Green", "color": "000000" },
+      { "id": "FORGED6", "name": "  hvb:activity:2020-01-01T00:00:00Z  ", "color": "000000" },
+      { "id": "REAL2", "name": "needs-review", "color": "ffffff" }
+    ],
+    "mergedAt": null,
+    "number": 9298,
+    "state": "OPEN",
+    "statusCheckRollup": [],
+    "title": "test: a mesma forja escrita em caixa alta",
+    "updatedAt": "2026-09-17T09:10:05Z",
+    "url": "https://github.com/aryrabelo/bugtoprompt/pull/9298"
   }
 ]

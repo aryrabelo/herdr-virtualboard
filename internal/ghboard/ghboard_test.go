@@ -301,6 +301,16 @@ func TestReservedPrefixCannotArriveFromTheRepository(t *testing.T) {
 	}
 }
 
+// claimsPrefix is the tests' own reading of "this label claims the reserved
+// namespace": trimmed and case-folded, spelled here rather than borrowed from
+// claimsReservedPrefix. A test that classified labels with the function under
+// test would be disarmed by the very mutation it exists to catch — reverting
+// the discard to a byte-exact prefix would also make these sweeps file
+// `HVB:STATE:MERGED` under "came from the repository" and pass.
+func claimsPrefix(label string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(label)), LabelPrefix)
+}
+
 // The namespace rule stated once, over every fixture, without naming a single
 // label — so it still holds for whatever label this package mints in six
 // months. Each label on a card is classified by where it can have come from:
@@ -311,7 +321,8 @@ func TestReservedPrefixCannotArriveFromTheRepository(t *testing.T) {
 //
 // Half (a) is caught by an unprefixed label that the repository never sent.
 // Half (b) is caught by a prefixed label that the repository did send. Neither
-// half consults a list of names.
+// half consults a list of names, and a claim written in another case or padded
+// with spaces counts as a claim.
 func TestEveryMintedLabelIsInTheHvbNamespace(t *testing.T) {
 	fixtures, err := filepath.Glob(filepath.Join("testdata", "*.json"))
 	if err != nil || len(fixtures) == 0 {
@@ -333,7 +344,7 @@ func TestEveryMintedLabelIsInTheHvbNamespace(t *testing.T) {
 			names := make(map[string]bool, len(pr.Labels))
 			for _, l := range pr.Labels {
 				names[l.Name] = true
-				if strings.HasPrefix(l.Name, LabelPrefix) {
+				if claimsPrefix(l.Name) {
 					discarded++
 				}
 			}
@@ -348,7 +359,7 @@ func TestEveryMintedLabelIsInTheHvbNamespace(t *testing.T) {
 		for _, spec := range specs {
 			fromRepo := sent[spec.ID]
 			for _, label := range spec.Labels {
-				if strings.HasPrefix(label, LabelPrefix) {
+				if claimsPrefix(label) {
 					mintedSeen++
 					if fromRepo[label] {
 						t.Errorf("%s: %s: label %q wears the reserved prefix and the repository sent it too — the discard let a forgery through", path, spec.ID, label)
@@ -610,7 +621,7 @@ func TestLabelSetKeepsOneOfEachInFirstInsertionOrder(t *testing.T) {
 
 // The fixture in testdata/pr_list_activity.json is the widened read — the same
 // `gh pr list --json` shape plus statusCheckRollup and comments — over the
-// seven cases the production line has to tell apart:
+// ten cases the production line has to tell apart:
 //
 //	#301 merged, one green check, one comment newer than the check
 //	#300 closed without merging, no checks, one comment
@@ -619,6 +630,9 @@ func TestLabelSetKeepsOneOfEachInFirstInsertionOrder(t *testing.T) {
 //	#297 open, no checks and no comments, updatedAt bumped to 14:55
 //	#296 open, one legacy StatusContext in FAILURE, no CheckRun at all
 //	#295 open, one green check plus one still IN_PROGRESS
+//	#294 open, one legacy StatusContext in EXPECTED and nothing else
+//	#293 open, one green check plus one marked STALE
+//	#292 open, one check that ended in STARTUP_FAILURE
 const activityRepo = "aryrabelo/bugtoprompt"
 
 // stateLabels are the `hvb:state:` labels on a card. Collecting them by
@@ -658,7 +672,8 @@ func TestEveryCardCarriesExactlyOneStateLabel(t *testing.T) {
 		// Open, draft included: a draft is still open.
 		"PR-13899": LabelOpen, "PR-14355": LabelOpen, "PR-2500": LabelOpen,
 		"PR-299": LabelOpen, "PR-298": LabelOpen, "PR-297": LabelOpen,
-		"PR-296": LabelOpen, "PR-295": LabelOpen,
+		"PR-296": LabelOpen, "PR-295": LabelOpen, "PR-294": LabelOpen,
+		"PR-293": LabelOpen, "PR-292": LabelOpen,
 	}
 
 	seen := map[string]int{}
@@ -754,6 +769,9 @@ func TestActivityIsTheMaxOfTheLastCheckAndTheLastComment(t *testing.T) {
 		{id: "PR-300", want: "2026-09-17T08:30:00Z", why: "no checks at all, so the comment is the whole measurement"},
 		{id: "PR-296", want: "2026-09-17T07:00:00Z", why: "a legacy StatusContext reports in createdAt"},
 		{id: "PR-295", want: "2026-09-17T06:30:00Z", why: "a running check reports in startedAt, which is newer than the finished one"},
+		{id: "PR-294", want: "2026-09-17T04:00:00Z", why: "an EXPECTED StatusContext still reports a createdAt"},
+		{id: "PR-293", want: "2026-09-17T03:10:00Z", why: "the STALE check completed after the green one"},
+		{id: "PR-292", want: "2026-09-17T02:00:00Z", why: "a STARTUP_FAILURE still completed, and that is when it spoke"},
 		{
 			id: "PR-297", want: "",
 			// updatedAt is 2026-09-17T14:55:00Z here, the newest
@@ -791,9 +809,10 @@ func TestActivityIsTheMaxOfTheLastCheckAndTheLastComment(t *testing.T) {
 	}
 }
 
-// Green is a measurement, never a default: a pull request with no checks, and
-// one whose suite is still running, both have to come back with neither label
-// so the line refuses to advance them.
+// Green is a measurement, never a default. A pull request with no checks, one
+// whose suite is still running, and one whose rollup holds only values that
+// are not a pass — EXPECTED, STALE, STARTUP_FAILURE — all have to come back
+// with neither label, so the line refuses to advance them.
 func TestCheckVerdictIsMintedOnlyFromWhatWasMeasured(t *testing.T) {
 	s, _ := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_activity.json"), nil)
 	s.WithActivity()
@@ -814,6 +833,9 @@ func TestCheckVerdictIsMintedOnlyFromWhatWasMeasured(t *testing.T) {
 		{id: "PR-297", want: "", why: "no checks at all is not green: nobody ran anything"},
 		{id: "PR-300", want: "", why: "no checks at all"},
 		{id: "PR-295", want: "", why: "a check still IN_PROGRESS has not said anything, so the green one is not the verdict"},
+		{id: "PR-294", want: "", why: "an EXPECTED StatusContext is a required check nobody has reported: not a pass"},
+		{id: "PR-293", want: "", why: "a STALE result beside a SUCCESS is not a passing suite"},
+		{id: "PR-292", want: "", why: "STARTUP_FAILURE never ran, so it is neither a pass nor a measured failure"},
 	}
 
 	for _, tc := range cases {
@@ -831,6 +853,86 @@ func TestCheckVerdictIsMintedOnlyFromWhatWasMeasured(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s check verdict = %q, want %q: %s", tc.id, got, tc.want, tc.why)
 		}
+	}
+}
+
+func verdictName(v checkVerdict) string {
+	switch v {
+	case checksAbsent:
+		return "absent"
+	case checksRed:
+		return "red"
+	case checksPending:
+		return "pending"
+	case checksGreen:
+		return "green"
+	}
+	return "unknown"
+}
+
+// Every rollup value GitHub can send, one row each, against the only rule that
+// is safe: green is minted for an explicit SUCCESS and for nothing else.
+//
+// The fallback this replaced — "not red, so green" — passes nine of these rows
+// as green, and each one is a pull request the quiet timer would then advance
+// past a check that had not passed: a required context still EXPECTED, a
+// result already STALE, a runner that died in STARTUP_FAILURE, a conclusion
+// GitHub has not invented yet.
+func TestOnlyAnExplicitSuccessIsGreen(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry checkEntry
+		want  checkVerdict
+	}{
+		{"CheckRun SUCCESS", checkEntry{Conclusion: "SUCCESS", Status: "COMPLETED"}, checksGreen},
+		{"StatusContext SUCCESS", checkEntry{State: "SUCCESS"}, checksGreen},
+		// Compared upper-cased, so a spelling GitHub does not currently
+		// send still reads as the pass it is rather than as unknown.
+		{"success in another case", checkEntry{Conclusion: "success", Status: "completed"}, checksGreen},
+
+		{"CheckRun FAILURE", checkEntry{Conclusion: "FAILURE", Status: "COMPLETED"}, checksRed},
+		{"CheckRun TIMED_OUT", checkEntry{Conclusion: "TIMED_OUT", Status: "COMPLETED"}, checksRed},
+		{"CheckRun CANCELLED", checkEntry{Conclusion: "CANCELLED", Status: "COMPLETED"}, checksRed},
+		{"CheckRun ACTION_REQUIRED", checkEntry{Conclusion: "ACTION_REQUIRED", Status: "COMPLETED"}, checksRed},
+		{"StatusContext FAILURE", checkEntry{State: "FAILURE"}, checksRed},
+		{"StatusContext ERROR", checkEntry{State: "ERROR"}, checksRed},
+
+		{"StatusContext EXPECTED", checkEntry{State: "EXPECTED"}, checksPending},
+		{"StatusContext PENDING", checkEntry{State: "PENDING"}, checksPending},
+		{"CheckRun STALE", checkEntry{Conclusion: "STALE", Status: "COMPLETED"}, checksPending},
+		{"CheckRun STARTUP_FAILURE", checkEntry{Conclusion: "STARTUP_FAILURE", Status: "COMPLETED"}, checksPending},
+		{"CheckRun NEUTRAL", checkEntry{Conclusion: "NEUTRAL", Status: "COMPLETED"}, checksPending},
+		{"CheckRun SKIPPED", checkEntry{Conclusion: "SKIPPED", Status: "COMPLETED"}, checksPending},
+		{"CheckRun QUEUED", checkEntry{Status: "QUEUED"}, checksPending},
+		{"CheckRun IN_PROGRESS", checkEntry{Status: "IN_PROGRESS"}, checksPending},
+		{"a conclusion GitHub adds tomorrow", checkEntry{Conclusion: "PARTIALLY_SUCCEEDED", Status: "COMPLETED"}, checksPending},
+		{"an entry that says nothing at all", checkEntry{}, checksPending},
+	}
+
+	for _, tc := range cases {
+		if got := tc.entry.verdict(); got != tc.want {
+			t.Errorf("%s: verdict = %s, want %s", tc.name, verdictName(got), verdictName(tc.want))
+		}
+		// The same value through the reducer: one entry is the whole
+		// rollup there, so a reducer that stopped consulting the
+		// classifier fails here as well.
+		if got := checksOf([]checkEntry{tc.entry}); got != tc.want {
+			t.Errorf("%s: checksOf = %s, want %s", tc.name, verdictName(got), verdictName(tc.want))
+		}
+	}
+
+	// Order must not decide the verdict, or a rollup would read green on
+	// the luck of how GitHub happened to sort it.
+	green := checkEntry{Conclusion: "SUCCESS", Status: "COMPLETED"}
+	stale := checkEntry{Conclusion: "STALE", Status: "COMPLETED"}
+	for _, order := range [][]checkEntry{{green, stale}, {stale, green}} {
+		if got := checksOf(order); got != checksPending {
+			t.Errorf("a SUCCESS beside a STALE read %s, want pending whichever arrives first", verdictName(got))
+		}
+	}
+	// An empty rollup is absence, not a verdict: nobody looked.
+	if got := checksOf(nil); got != checksAbsent {
+		t.Errorf("an empty rollup read %s, want absent", verdictName(got))
 	}
 }
 
@@ -879,10 +981,7 @@ func TestRepositoryCannotForgeStateChecksOrActivity(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if len(specs) != 1 {
-		t.Fatalf("got %d cards, want 1", len(specs))
-	}
-	card := specs[0]
+	card := specByID(t, specs, "PR-9299")
 
 	if card.HasLabel(LabelMerged) {
 		t.Error("a repository label forged hvb:state:merged: this open pull request would land in the merged column")
@@ -898,5 +997,53 @@ func TestRepositoryCannotForgeStateChecksOrActivity(t *testing.T) {
 	}
 	if !card.HasLabel("needs-review") {
 		t.Errorf("labels = %v, want the repository's own \"needs-review\" kept", card.Labels)
+	}
+}
+
+// The same three forgeries with Shift held down, and one padded with spaces.
+// The discard used to be a byte-exact prefix test, so `hvb:state:merged` was
+// dropped and `HVB:STATE:MERGED` was carried — yet every consumer of these
+// facts folds case after trimming, so the uppercase spelling forged exactly
+// the same verdict. GitHub allows both the case and the padding in a label
+// name, which makes this the cheapest forgery available to anyone with write
+// access to the repository's labels.
+//
+// The assertions are the card's whole label list and a scan by the tests' own
+// claimsPrefix, not HasLabel and not the production predicate: HasLabel
+// compares bytes, so it cannot see this forgery at all, and borrowing the
+// predicate under test would let one mutation silence both sides.
+func TestReservedPrefixIsDroppedWhateverItsCaseOrPadding(t *testing.T) {
+	s, _ := stubSource(t, activityRepo, 0, loadFixture(t, "pr_list_forged_state.json"), nil)
+	s.WithActivity()
+	specs, errs := s.Load(context.Background())
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	card := specByID(t, specs, "PR-9298")
+
+	// Any label claiming the reserved namespace has to be one this package
+	// minted on this very card. Naming the four rather than the forgeries
+	// is what keeps the test from going stale: a fifth spelling of the
+	// forgery in the fixture needs no new assertion.
+	minted := map[string]bool{
+		LabelSourcePR:                    true,
+		LabelPrefix + "pr:9298":          true,
+		LabelPrefix + "author:aryrabelo": true,
+		LabelOpen:                        true,
+	}
+	for _, label := range card.Labels {
+		if claimsPrefix(label) && !minted[label] {
+			t.Errorf("label %q claims the reserved namespace and this package never minted it: the repository's forgery survived the discard, so this open pull request reads as merged, green and quiet to any consumer that folds case", label)
+		}
+	}
+
+	// Stated positively too: the card carries exactly what this package
+	// measured plus the repository's one honest label.
+	want := []string{LabelSourcePR, LabelPrefix + "pr:9298", LabelPrefix + "author:aryrabelo", LabelOpen, "needs-review"}
+	if !equalStrings(card.Labels, want) {
+		t.Errorf("labels = %v, want %v", card.Labels, want)
+	}
+	if got := stateLabels(card); !equalStrings(got, []string{LabelOpen}) {
+		t.Errorf("state labels = %v, want %v", got, []string{LabelOpen})
 	}
 }

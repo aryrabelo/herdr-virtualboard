@@ -324,10 +324,17 @@ func (p *pullRequest) spec(repoOwner string) *feature.Spec {
 	// there it would forge a verdict the board treats as the harness's own.
 	// Discarding is the only outcome that keeps a minted label a statement
 	// about what hvb measured rather than about what a repository typed.
+	//
+	// Whether a label claims the prefix is claimsReservedPrefix's call, and
+	// it is deliberately not a byte-exact comparison: see there.
 	for _, label := range p.Labels {
-		if strings.HasPrefix(label.Name, LabelPrefix) {
+		if claimsReservedPrefix(label.Name) {
 			continue
 		}
+		// What survives is the repository's own bytes, untrimmed. The
+		// board renders the label GitHub shows; normalising it here
+		// would put a label on a card that its pull request does not
+		// carry, and the namespace sweep reads that as a forgery.
 		labels.add(label.Name)
 	}
 	if len(deps) == 0 {
@@ -359,6 +366,20 @@ func (p *pullRequest) spec(repoOwner string) *feature.Spec {
 // carried. Without that, prefixing would only move the target — the forgery
 // would just spell the prefix too.
 const LabelPrefix = "hvb:"
+
+// claimsReservedPrefix reports whether a label that came from outside this
+// package is claiming the reserved namespace, and therefore has to be dropped.
+//
+// The comparison trims and folds case because a GitHub label name does
+// neither: a repository is free to carry `HVB:STATE:MERGED` or
+// ` hvb:check:green`, and every consumer of these facts matches them
+// case-insensitively after trimming — the production line's policy does. A
+// byte-exact strings.HasPrefix dropped only the lowercase spelling, so the
+// forgery just had to hold shift to land an open pull request in the merged
+// column or skip the check gate.
+func claimsReservedPrefix(label string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(label)), LabelPrefix)
+}
 
 // Labels every card from this source carries or may carry. The composing
 // backend keys its extra terminal column off LabelCanceled and its badge off
@@ -448,17 +469,20 @@ const (
 
 // checksOf reduces the rollup to one verdict. Red wins over pending because a
 // failure is already a fact; pending wins over green because a run still going
-// has not said anything yet.
+// has not said anything yet, and green is the weakest claim of the three —
+// only an unbroken sweep of explicit successes earns it.
 func checksOf(rollup []checkEntry) checkVerdict {
 	verdict := checksAbsent
 	for _, entry := range rollup {
-		switch {
-		case entry.red():
+		switch entry.verdict() {
+		case checksRed:
 			return checksRed
-		case entry.pending():
+		case checksPending:
 			verdict = checksPending
-		case verdict == checksAbsent:
-			verdict = checksGreen
+		case checksGreen:
+			if verdict == checksAbsent {
+				verdict = checksGreen
+			}
 		}
 	}
 	return verdict
@@ -476,24 +500,58 @@ var redConclusions = map[string]bool{
 	"ERROR":           true,
 }
 
-func (c checkEntry) red() bool {
-	return redConclusions[strings.ToUpper(strings.TrimSpace(c.Conclusion))] ||
-		redConclusions[strings.ToUpper(strings.TrimSpace(c.State))]
+// checkSuccess is the only value that earns green. GitHub sends these in
+// SCREAMING_SNAKE_CASE (measured against gh 2.97.0: `"conclusion":"SUCCESS"`
+// on a CheckRun, `"state":"SUCCESS"` on a StatusContext); the comparison
+// upper-cases anyway, so a differently-cased spelling reads as the same
+// success rather than as an unknown value.
+const checkSuccess = "SUCCESS"
+
+// verdict classifies one rollup entry.
+//
+// Green is the one verdict that requires a positive statement, because it is
+// the only one the production line reads as permission to move: the entry has
+// to say SUCCESS in the field its own shape uses — `conclusion` for a
+// CheckRun, `state` for a legacy StatusContext.
+//
+// Everything that is neither a terminal failure nor an explicit success is
+// pending, which mints no label at all. The rejected alternative was the
+// fallback this replaced — "not red, therefore green" — which read as passing
+// every value that is neither: a StatusContext in EXPECTED (a required check
+// GitHub knows about that nothing has reported yet), and the CheckRun
+// conclusions STALE, STARTUP_FAILURE, NEUTRAL and SKIPPED, none of which is a
+// run that passed. Each of those made a quiet card advance past an unfinished
+// or broken check, which is the one thing the gate exists to stop.
+//
+// An unknown value lands in pending too, so a conclusion GitHub adds tomorrow
+// cannot become permission to move by default. It is not red either: the line
+// must not report a failure nobody measured.
+func (c checkEntry) verdict() checkVerdict {
+	conclusion := normalizeCheckValue(c.Conclusion)
+	state := normalizeCheckValue(c.State)
+	if redConclusions[conclusion] || redConclusions[state] {
+		return checksRed
+	}
+	// A CheckRun that has not finished says so in `status` (anything but
+	// COMPLETED: QUEUED, IN_PROGRESS, WAITING, REQUESTED) and carries no
+	// conclusion yet. A legacy StatusContext has no `status` key at all,
+	// so an absent status has to read as absence rather than as "not
+	// COMPLETED" — a bare `c.Status != "COMPLETED"` would call every
+	// StatusContext pending, and a repository on commit statuses would
+	// never show green.
+	if status := normalizeCheckValue(c.Status); status != "" && status != "COMPLETED" {
+		return checksPending
+	}
+	if conclusion == checkSuccess || state == checkSuccess {
+		return checksGreen
+	}
+	return checksPending
 }
 
-// pending is a check that has not reported yet. A CheckRun says so in `status`
-// (anything but COMPLETED: QUEUED, IN_PROGRESS, WAITING, REQUESTED); a legacy
-// StatusContext has no `status` key at all and says PENDING in `state`.
-//
-// An absent `status` therefore has to read as absence rather than as "not
-// COMPLETED". The rejected alternative — a bare `c.Status != "COMPLETED"` —
-// would call every StatusContext pending, so a repository on commit statuses
-// would never show green and the quiet timer would never fire for it.
-func (c checkEntry) pending() bool {
-	if status := strings.ToUpper(strings.TrimSpace(c.Status)); status != "" && status != "COMPLETED" {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(c.State), "PENDING")
+// normalizeCheckValue is how every rollup value is compared: trimmed and
+// upper-cased, once, so no caller decides it for itself.
+func normalizeCheckValue(raw string) string {
+	return strings.ToUpper(strings.TrimSpace(raw))
 }
 
 // reportedAt is when this entry last said something: a CheckRun's completedAt,
